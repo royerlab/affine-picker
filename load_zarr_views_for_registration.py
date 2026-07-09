@@ -394,6 +394,82 @@ def _view_pair_offset(
     return offset, f"view_pair_offsets.{key}"
 
 
+# Views acquired through the inverted objective. The deskew-fuse pipeline
+# places these into the shared frame with an extra Y-flip and the top/bottom
+# offset (see place_view_in_top_bottom_frame in impp).
+_BOTTOM_VIEW_IDS = frozenset({2, 3})
+
+
+def _flip_axes_for_camera(value: Any, camera_id: int | None) -> tuple[int, ...]:
+    if not isinstance(value, dict) or camera_id is None:
+        return ()
+    axes = None
+    for key in (camera_id, str(camera_id)):
+        if key in value:
+            axes = value[key]
+            break
+    if axes is None:
+        return ()
+    try:
+        return tuple(int(axis) for axis in axes if int(axis) in (0, 1, 2))
+    except (TypeError, ValueError):
+        return ()
+
+
+def _camera_post_deskew_flip_axes(
+    project_folder: Path | None,
+    transform_yaml: Path | None,
+    camera_id: int | None,
+) -> tuple[tuple[int, ...], str]:
+    """Read camera_axes_to_flip_post_deskew as the pipeline applied it.
+
+    The deskew-fuse pipeline flips these axes on *every* view of the camera
+    right after the affine resample. The point-picker POST model must mirror
+    this so the solved view transforms land correctly once re-run.
+    """
+    settings_data, settings_source = _load_project_yaml(
+        project_folder,
+        "impp_settings.yaml",
+    )
+    processing = settings_data.get("processing")
+    if isinstance(processing, dict) and (
+        "camera_axes_to_flip_post_deskew" in processing
+    ):
+        axes = _flip_axes_for_camera(
+            processing.get("camera_axes_to_flip_post_deskew"),
+            camera_id,
+        )
+        return axes, f"{settings_source} processing.camera_axes_to_flip_post_deskew"
+    if "camera_axes_to_flip_post_deskew" in settings_data:
+        axes = _flip_axes_for_camera(
+            settings_data.get("camera_axes_to_flip_post_deskew"),
+            camera_id,
+        )
+        return axes, f"{settings_source} camera_axes_to_flip_post_deskew"
+    if transform_yaml is not None:
+        data = _load_yaml(transform_yaml.expanduser())
+        axes = _flip_axes_for_camera(
+            data.get("camera_axes_to_flip_post_deskew"),
+            camera_id,
+        )
+        return axes, f"{transform_yaml} camera_axes_to_flip_post_deskew"
+    return (), "no camera_axes_to_flip_post_deskew found (assuming none)"
+
+
+def _top_bottom_offset(
+    alignment_data: dict[str, Any],
+    camera_id: int | None,
+) -> tuple[tuple[int, int, int] | None, str]:
+    scoped = _offset_scope(alignment_data, camera_id)
+    offset = _offset3d(scoped.get("top_bottom_offsets"))
+    if offset is not None:
+        return offset, "top_bottom_offsets"
+    offset = _offset3d(alignment_data.get("top_bottom_offsets"))
+    if offset is not None:
+        return offset, "top_bottom_offsets"
+    return None, "no top_bottom_offsets"
+
+
 def _camera_alignment_affine(
     alignment_data: dict[str, Any],
     camera_id: int | None,
@@ -426,18 +502,41 @@ def _camera_alignment_affine(
     return _identity4(), f"no camera_alignment for {camera_key}.{view_key}"
 
 
-def _view_objective_flip_affine(
+def _view_post_processing_affine(
     view_id: int,
     shape_zyx: tuple[int, int, int],
+    post_deskew_flip_axes: tuple[int, ...],
+    top_bottom_offset: tuple[int, int, int] | None,
 ) -> tuple[np.ndarray, str]:
-    if view_id not in (2, 3):
-        return _identity4(), "objective flip: none"
+    """POST factor between the view affine and the shared deskew-fuse frame.
 
-    axes_tuple = (1,)
-    return (
-        _flip_affine_for_axes(shape_zyx, axes_tuple),
-        f"objective flip for inverted-objective view {view_id} axes={axes_tuple}",
-    )
+    This must reproduce exactly what the pipeline does after
+    ``resample_affine`` (and before the view-pair offset, handled separately):
+
+    1. Post-deskew flips on *every* view of the camera
+       (``camera_axes_to_flip_post_deskew``).
+    2. Top/bottom placement for the inverted-objective views (2, 3): an extra
+       Y-flip plus the ``top_bottom_offset`` translation.
+
+    For the usual DaXI config (post-deskew Y-flip on all views) the two Y-flips
+    cancel on the bottom views, leaving only the top/bottom offset there, while
+    the top views (0, 1) keep a single Y-flip. The previous implementation had
+    this backwards -- it flipped only views 2, 3 and ignored the top/bottom
+    offset -- which corrupted the solved transforms once the pipeline re-ran.
+    """
+    transform = _flip_affine_for_axes(shape_zyx, post_deskew_flip_axes)
+    notes = [f"post-deskew flip axes={tuple(post_deskew_flip_axes)}"]
+
+    if view_id in _BOTTOM_VIEW_IDS:
+        tb_flip = _flip_affine_for_axes(shape_zyx, (1,))
+        tb_shift = _translation_affine(top_bottom_offset)
+        transform = tb_shift @ tb_flip @ transform
+        notes.append(
+            "top/bottom placement Y-flip + offset "
+            f"{tuple(top_bottom_offset) if top_bottom_offset else (0, 0, 0)}"
+        )
+
+    return transform, "; ".join(notes)
 
 
 def _infer_pipeline_slot(
@@ -493,12 +592,23 @@ def _infer_pipeline_slot(
     if post_offset is not None:
         post_source = f"{alignment_source} {post_source}"
 
-    post_processing_affine, post_processing_source = _view_objective_flip_affine(
+    post_deskew_flip_axes, flip_source = _camera_post_deskew_flip_axes(
+        project_folder,
+        transform_yaml,
+        camera_id,
+    )
+    tb_offset, tb_source = _top_bottom_offset(alignment_data, camera_id)
+    post_processing_affine, post_processing_source = _view_post_processing_affine(
         view_id,
         view_shape_zyx,
+        post_deskew_flip_axes,
+        tb_offset,
     )
     post_affine = pair_offset_affine @ post_processing_affine
-    post_source = f"{post_source}; {post_processing_source}"
+    post_source = (
+        f"{post_source}; {post_processing_source} "
+        f"[{flip_source}; {alignment_source} {tb_source}]"
+    )
 
     prev_affine, prev_source = _camera_alignment_affine(
         alignment_data,

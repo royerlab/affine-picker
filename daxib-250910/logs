@@ -1,0 +1,208 @@
+uv run python3 load_zarr_views_for_registration.py \
+     --zarr-path  /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0 \
+     --fixed-channel 14 \
+     --moving-channel 15 \
+     --fixed-camera-id 3 \
+     --moving-camera-id 3 \
+     --fixed-view-id 2 \
+     --moving-view-id 3 \
+     --alignment-mode view \
+     --no-flip-moving-y \
+     --output-mode shared-space --project-folder /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B\
+∙ 
+Fixed zarr:  /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0
+Moving zarr: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0
+Fixed shape (T, C, Z, Y, X):  (1, 16, 1337, 2372, 4501)
+Moving shape (T, C, Z, Y, X): (1, 16, 1337, 2372, 4501)
+Loaded timepoint 0, fixed channel 14, moving channel 15
+Fixed view id: 2 (command line)
+Moving view id: 3 (command line)
+Fixed camera id: 3 (command line)
+Moving camera id: 3 (command line)
+Output mode: shared-space
+Shared-space offset mode: split-offset
+Estimated affine direction: moving-to-fixed (as estimated)
+Fixed pipeline slot target: view_transforms
+Fixed A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[2]
+Fixed POST source: view 2 has no post view-pair offset slot; objective flip for inverted-objective view 2 axes=(1,)
+Fixed PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_2
+Moving pipeline slot target: view_transforms
+Moving A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[3]
+Moving POST source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml view_pair_offsets.pair_2_3; objective flip for inverted-objective view 3 axes=(1,)
+Moving PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_3
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast
+  y = conv.wrap(y.astype(dtype, copy=False))
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast
+  y = conv.wrap(y.astype(dtype, copy=False))
+Affine estimator: VIEW alignment estimator
+WARNING: Blending of labels layers may not display correctly. You may have to set blending to 'translucent_no_depth' manually for new layers. To ensure correct blending of layers in the main viewer, call OrthoViewManager before adding layers to the viewer.
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast!
+[PointPicker] Selected point pairs (original data space):
+  View 14: camera 22500105 view 2 @ 561nm: (376.0, 1196.0, 2314.0)   View 15: camera 22500105 view 3 @ 561nm (moving view): (372.0, 1193.7239844057658, 2284.3864235285137)
+  View 14: camera 22500105 view 2 @ 561nm: (791.0, 1195.0, 4236.0)   View 15: camera 22500105 view 3 @ 561nm (moving view): (786.0, 1189.0, 4203.0)
+  View 14: camera 22500105 view 2 @ 561nm: (760.0, 1182.5173874810275, 890.0)   View 15: camera 22500105 view 3 @ 561nm (moving view): (757.0, 1174.0, 858.0)
+  View 14: camera 22500105 view 2 @ 561nm: (107.0, 90.0, 735.2794230036969)   View 15: camera 22500105 view 3 @ 561nm (moving view): (124.0, 90.0, 701.0)
+[PointPicker] World-space affine (layer2 → layer1):
+[[  1.             0.0183396577   0.0005187435 -19.0134200254]
+ [  0.             1.0060364622  -0.0006136403  -0.0705797288]
+ [  0.            -0.0031690225   1.0004008039  34.306131757 ]
+ [  0.             0.             0.             1.          ]]
+[PointPicker] Data-space affine (layer2 → layer1):
+[[  1.             0.0183396577   0.0005187435 -19.0134200254]
+ [  0.             1.0060364622  -0.0006136403  -0.0705797288]
+ [  0.            -0.0031690225   1.0004008039  34.306131757 ]
+ [  0.             0.             0.             1.          ]]
+[PointPicker] Data-space residuals after affine (RMS=2.415, max=3.910 at pair 1):
+  pair 1: residual=(0.064, 3.457, 1.825), norm=3.910
+  pair 2: residual=(-0.027, -1.472, -0.777), norm=1.665
+  pair 3: residual=(-0.038, -2.028, -1.070), norm=2.293
+  pair 4: residual=(0.001, 0.043, 0.022), norm=0.048
+[TransformYAML] Shared-space solve:
+[TransformYAML] estimated maps moving view data -> fixed view data
+[TransformYAML] shared-space offset mode: split-offset
+[TransformYAML] centered POST offsets around pair center (-24.5, 0.0, 0.0)
+[TransformYAML] fixed centered POST offset: (24.5, 0.0, 0.0)
+[TransformYAML] moving centered POST offset: (-24.5, 0.0, 0.0)
+[TransformYAML] output view-pair offsets are zero; pipeline post-deskew flips remain in POST.
+[TransformYAML] half = sqrt(estimated)
+[TransformYAML] fixed correction = inv(half)
+[TransformYAML] moving correction = half
+[TransformYAML] correction @ CENTERED_POST @ A_old @ PREV = OUTPUT_POST @ A_new @ PREV
+[TransformYAML] A_new = inv(OUTPUT_POST) @ correction @ CENTERED_POST @ A_old
+[TransformYAML] Fixed view: 2
+[TransformYAML] Moving view: 3
+[TransformYAML] Fixed camera: 3
+[TransformYAML] Moving camera: 3
+[TransformYAML] Fixed A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[2]
+[TransformYAML] Fixed POST source: view 2 has no post view-pair offset slot; objective flip for inverted-objective view 2 axes=(1,)
+[TransformYAML] Fixed PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_2
+[TransformYAML] Moving A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[3]
+[TransformYAML] Moving POST source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml view_pair_offsets.pair_2_3; objective flip for inverted-objective view 3 axes=(1,)
+[TransformYAML] Moving PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_3
+[TransformYAML] Copy-paste block:
+view_transforms:
+  2:
+    - [1.0000000000, 0.1480620177, -0.0052814875, -104.3519000772]
+    - [0.0000000000, 0.9910645411, 0.0051743761, 137.6029508755]
+    - [0.0000000000, 0.0157063422, 0.9911505691, -66.3585589284]
+    - [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+  3:
+    - [1.0000000000, -0.1477520594, -0.0009653202, 125.9773783359]
+    - [0.0000000000, 0.9970644085, 0.0090215754, 119.1827624913]
+    - [0.0000000000, 0.0203652184, 0.9916308953, -70.2522352431]
+    - [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+[TransformYAML] Also update views_alignment.yaml:
+view_pair_offsets:
+  pair_2_3:
+    - 0
+    - 0
+    - 0
+[TransformYAML] Output label: A_new/B_new
+[PointPicker] Saved 4 pairs to /hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/daxib-250910/point_pairs_561nm_v2v3.json
+
+
+----------------------------------------------------------------
+
+ uv run python3 load_zarr_views_for_registration.py \
+     --zarr-path  /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0 \
+     --fixed-channel 12 \
+     --moving-channel 13 \
+     --fixed-camera-id 3 \
+     --moving-camera-id 3 \
+     --fixed-view-id 0 \
+     --moving-view-id 1 \
+     --alignment-mode view \
+     --no-flip-moving-y \
+     --output-mode shared-space --project-folder /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B\
+∙ 
+
+Fixed zarr:  /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0
+Moving zarr: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/deskewed.zarr/0
+Fixed shape (T, C, Z, Y, X):  (1, 16, 1337, 2372, 4501)
+Moving shape (T, C, Z, Y, X): (1, 16, 1337, 2372, 4501)
+Loaded timepoint 0, fixed channel 12, moving channel 13
+Fixed view id: 0 (command line)
+Moving view id: 1 (command line)
+Fixed camera id: 3 (command line)
+Moving camera id: 3 (command line)
+Output mode: shared-space
+Shared-space offset mode: split-offset
+Estimated affine direction: moving-to-fixed (as estimated)
+Fixed pipeline slot target: view_transforms
+Fixed A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[0]
+Fixed POST source: view 0 has no post view-pair offset slot; objective flip: none
+Fixed PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_0
+Moving pipeline slot target: view_transforms
+Moving A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[1]
+Moving POST source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml view_pair_offsets.pair_0_1; objective flip: none
+Moving PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_1
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast
+  y = conv.wrap(y.astype(dtype, copy=False))
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast
+  y = conv.wrap(y.astype(dtype, copy=False))
+Affine estimator: VIEW alignment estimator
+WARNING: Blending of labels layers may not display correctly. You may have to set blending to 'translucent_no_depth' manually for new layers. To ensure correct blending of layers in the main viewer, call OrthoViewManager before adding layers to the viewer.
+/hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/.venv/lib/python3.13/site-packages/numpy/_core/function_base.py:183: RuntimeWarning: overflow encountered in cast!
+[PointPicker] Selected point pairs (original data space):
+  View 12: camera 22500105 view 0 @ 561nm: (739.0, 1203.0, 2966.0)   View 13: camera 22500105 view 1 @ 561nm (moving view): (732.0, 1193.0, 2991.7617251317542)
+  View 12: camera 22500105 view 0 @ 561nm: (227.0, 1202.6737723162214, 392.3881501308818)   View 13: camera 22500105 view 1 @ 561nm (moving view): (220.0, 1197.0, 419.0)
+  View 12: camera 22500105 view 0 @ 561nm: (682.0, 650.0, 1778.0)   View 13: camera 22500105 view 1 @ 561nm (moving view): (684.0, 645.0, 1804.2233137978926)
+  View 12: camera 22500105 view 0 @ 561nm: (818.0, 1988.0, 1209.0)   View 13: camera 22500105 view 1 @ 561nm (moving view): (795.0, 1984.0, 1238.0)
+[PointPicker] World-space affine (layer2 → layer1):
+[[  1.             0.0188275676  -0.0000210862 -14.8398731522]
+ [  0.             0.9996207615   0.001800653    3.7393959173]
+ [  0.            -0.0020639651   1.0003720992 -24.9097497283]
+ [  0.             0.             0.             1.          ]]
+[PointPicker] Data-space affine (layer2 → layer1):
+[[  1.             0.0188275676  -0.0000210862 -14.8398731522]
+ [  0.             0.9996207615   0.001800653    3.7393959173]
+ [  0.            -0.0020639651   1.0003720992 -24.9097497283]
+ [  0.             0.             0.             1.          ]]
+[PointPicker] Data-space residuals after affine (RMS=1.717, max=2.002 at pair 3):
+  pair 1: residual=(0.558, -1.326, -0.497), norm=1.522
+  pair 2: residual=(0.688, -1.634, -0.613), norm=1.876
+  pair 3: residual=(-0.734, 1.744, 0.654), norm=2.002
+  pair 4: residual=(-0.512, 1.216, 0.456), norm=1.396
+[TransformYAML] Shared-space solve:
+[TransformYAML] estimated maps moving view data -> fixed view data
+[TransformYAML] shared-space offset mode: split-offset
+[TransformYAML] centered POST offsets around pair center (19.5, 0.0, 27.0)
+[TransformYAML] fixed centered POST offset: (-19.5, 0.0, -27.0)
+[TransformYAML] moving centered POST offset: (19.5, 0.0, 27.0)
+[TransformYAML] output view-pair offsets are zero; pipeline post-deskew flips remain in POST.
+[TransformYAML] half = sqrt(estimated)
+[TransformYAML] fixed correction = inv(half)
+[TransformYAML] moving correction = half
+[TransformYAML] correction @ CENTERED_POST @ A_old @ PREV = OUTPUT_POST @ A_new @ PREV
+[TransformYAML] A_new = inv(OUTPUT_POST) @ correction @ CENTERED_POST @ A_old
+[TransformYAML] Fixed view: 0
+[TransformYAML] Moving view: 1
+[TransformYAML] Fixed camera: 3
+[TransformYAML] Moving camera: 3
+[TransformYAML] Fixed A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[0]
+[TransformYAML] Fixed POST source: view 0 has no post view-pair offset slot; objective flip: none
+[TransformYAML] Fixed PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_0
+[TransformYAML] Moving A_old source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/impp_settings.yaml processing.view_transforms[1]
+[TransformYAML] Moving POST source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml view_pair_offsets.pair_0_1; objective flip: none
+[TransformYAML] Moving PREV source: /hpc/projects/group.royer/imaging/dev/2025_09_12_daxi_Daxi_B/views_alignment.yaml camera_alignment.transforms.camera_3.view_1
+[TransformYAML] Copy-paste block:
+view_transforms:
+  0:
+    - [1.0000000000, -0.1491387607, 0.0024466603, 116.1455675201]
+    - [0.0000000000, 1.0003751310, -0.0001466059, -8.2917982535]
+    - [0.0000000000, 0.0145799188, 0.9996246543, -12.5230506441]
+    - [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+  1:
+    - [1.0000000000, 0.1491380948, -0.0024599759, -115.8780556450]
+    - [0.0000000000, 0.9996098958, 0.0001472378, 8.3129860263]
+    - [0.0000000000, -0.0145845831, 1.0003863255, 12.3384401308]
+    - [0.0000000000, 0.0000000000, 0.0000000000, 1.0000000000]
+[TransformYAML] Also update views_alignment.yaml:
+view_pair_offsets:
+  pair_0_1:
+    - 0
+    - 0
+    - 0
+[TransformYAML] Output label: A_new/B_new
+[PointPicker] Saved 4 pairs to /hpc/mydata/ilan.silva/PyCharmProjects/napari-orthogonal-views/daxib-250910/point_pairs_561nm_v0v1.json
+
