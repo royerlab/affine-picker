@@ -48,6 +48,13 @@ Then paste all matrices into one file and install it.
 
 ## Step 1 — Camera alignment
 
+> **If the dataset contains beads, skip the GUI.**
+> `bead_camera_alignment.py` fits the same model from bead centroids and
+> prints the whole `camera_alignment` block, all views in one run, with
+> the sign already right. See
+> [Step 1 without the GUI](#step-1-without-the-gui-bead-datasets) below.
+> Pick points by hand when the sample has no beads, or to check a fit.
+
 Registers a moving camera (one serial/wavelength) onto the fixed
 reference camera for the same view. Uses separate fixed/moving zarr
 paths and `--alignment-mode camera` (the default). Example (view 0,
@@ -131,6 +138,58 @@ whole-field fit by 7.9 px at the far corner. Aim for 15 to 20 pairs
 reaching the top and bottom edges. Judge a run by its RMS (under about
 2 px at full resolution is good) but read it together with the coverage,
 since RMS only reports agreement on the points you picked.
+
+## Step 1 without the GUI (bead datasets)
+
+`bead_camera_alignment.py` replaces the point-picking above when the
+sample contains beads. It detects beads in both cameras, matches them,
+fits the in-plane (Y, X) affine with Z left untouched, and prints a
+`camera_alignment` block covering every view, ready to paste. Full
+resolution, four views, about two minutes:
+
+```
+ZARR=/hpc/instruments/royer.daxi1/JiaLe/alignment/\
+20260405_488nm_561nm_10fps_50mW_beforealignment.ome.zarr
+
+uv run python3 bead_camera_alignment.py \
+  --fixed-zarr-path  $ZARR/SN304410/488nm/pos0 \
+  --moving-zarr-path $ZARR/SN302483/561nm/pos0 \
+  --moving-camera-id 1 \
+  --flip-fixed-x \
+  --channels 0,1,2,3
+```
+
+The arguments carry the same meaning as in the GUI run: point it at the
+two position groups, name the moving camera's logical id, and set the
+flip flags to match `camera_axes_to_flip_pre_deskew`. It prints per view:
+
+```
+channel 0 -> view 0
+  seed phase-correlation (dY, dX)=[-222.  992.]: 64 pairs
+  seed zero (dY, dX)=[0. 0.]: 1494 pairs
+  seed zero wins with 1494 pairs
+  outlier cut  8.00 px:  1454 pairs, RMS=3.019 max=8.226
+  ...
+  re-match with fitted model: 1676 pairs
+  view 0: RMS=1.263 px  max=2.168 px  n=863
+```
+
+Read the RMS and the pair count. Both cameras see the same beads, so a
+view should yield hundreds of pairs and settle near 1 to 1.5 px at full
+resolution. A handful of pairs, or an RMS that stays above a few pixels,
+almost always means a wrong flip flag or a channel with no beads in it
+rather than a badly aligned camera. Two coarse starting guesses are
+tried because a dense bead field can hand phase correlation a wrong
+peak, visible above as the seed that found 64 pairs against 1494.
+
+`--json-out` writes the matrices and residuals for scripting. Passing a
+`--level` other than `0` fits on a downsampled pyramid level, which is
+useful for a quick check: the linear part is scale-free, but the
+translations come out in that level's pixels and need scaling before use.
+
+The example above produced
+`impp/impp/new_impp/config/transforms/daxi-a_2026-03-27.yaml`, whose
+header records the command so the numbers can be regenerated.
 
 ## Step 2 — View-pair alignment
 
@@ -252,6 +311,9 @@ napari before a full batch.
 - Have the tool write/append the YAML directly instead of manual
   paste-and-assemble across runs; ideally one driver that runs all
   required registrations for a microscope and emits the complete file.
+  `bead_camera_alignment.py` does this for the camera-alignment half on
+  bead data, so what remains is the view-pair half and writing the file
+  rather than printing it.
 - Remove redundant view-mode arguments: `--fixed-camera-id` /
   `--moving-camera-id` must be identical, and `--project-folder`
   duplicates the `--zarr-path` prefix.
