@@ -79,6 +79,15 @@ class TransformInference:
     moving_display_affine: np.ndarray
     fixed_view_source: str
     moving_view_source: str
+    # top-bottom modes: slot of the moving view's pair partner (updated with
+    # the same output-space correction as the moving view).
+    moving_pair_slot: PipelineSlot | None = None
+    moving_pair_view_id: int | None = None
+    # top-bottom-rebased: slots describing the dataset the points were
+    # picked on (old transforms/offsets), used to rebase the estimated
+    # affine into the current (new-transform) frame.
+    points_fixed_slot: PipelineSlot | None = None
+    points_moving_slot: PipelineSlot | None = None
 
 
 _VIEW_LABEL_RE = re.compile(r"\bview[_\s-]*(\d+)\b", re.IGNORECASE)
@@ -394,9 +403,12 @@ def _view_pair_offset(
     return offset, f"view_pair_offsets.{key}"
 
 
-# Views acquired through the inverted objective. The deskew-fuse pipeline
-# places these into the shared frame with an extra Y-flip and the top/bottom
-# offset (see place_view_in_top_bottom_frame in impp).
+# Views the deskew-fuse pipeline places into the shared frame with an extra
+# Y-flip and the top/bottom offset. NOTE: the pipeline HARDCODES this set
+# (Constants.OLD_FORMAT_BOTTOM_VIEWS = [2, 3] in impp new_impp/data/dataset.py
+# -- get_bottom_views() ignores the per-channel Top/Bottom metadata in the
+# settings), so this must stay hardcoded to mirror it, even for datasets
+# whose channel names label views 0,1 as "Bottom Objective".
 _BOTTOM_VIEW_IDS = frozenset({2, 3})
 
 
@@ -755,6 +767,203 @@ def _shared_view_pair_or_raise(
     return fixed_pair
 
 
+def _top_bottom_partner_or_raise(
+    fixed_view_id: int,
+    moving_view_id: int,
+) -> int:
+    """Validate a cross-pair (top<->bottom) setup; return the moving partner.
+
+    The moving view and its pair partner (0<->1 or 2<->3) both receive the
+    same output-space correction, so their mutual normalization is kept.
+    """
+    fixed_pair = _view_pair_for_view(fixed_view_id)
+    moving_pair = _view_pair_for_view(moving_view_id)
+    if fixed_pair is None or moving_pair is None or fixed_pair == moving_pair:
+        raise SystemExit(
+            "top-bottom output modes require fixed and moving views from "
+            "DIFFERENT pairs (e.g. fixed view 0, moving view 2). Got fixed "
+            f"view {fixed_view_id} and moving view {moving_view_id}."
+        )
+    partner = [v for v in moving_pair if v != moving_view_id]
+    return partner[0]
+
+
+def _full_pipeline_affine(slot: PipelineSlot) -> np.ndarray:
+    """Raw-data -> output-frame map realized by the pipeline for a slot."""
+    return slot.post_affine @ slot.old_affine @ slot.prev_affine
+
+
+def _print_top_bottom_affines(
+    data_affine: np.ndarray,
+    inference: TransformInference,
+) -> None:
+    """Apply a cross-pair correction to the moving view AND its partner.
+
+    ``data_affine`` maps moving-view output coords -> fixed-view output
+    coords in the CURRENT (new-transform) frame. Both moving-pair views get
+    A_new = inv(POST) @ correction @ POST @ A_old, which realigns them onto
+    the fixed pair while preserving their mutual normalization and the
+    existing views_alignment.yaml offsets.
+    """
+    moving_slot = inference.moving_slot
+    pair_slot = inference.moving_pair_slot
+    if pair_slot is None or inference.moving_pair_view_id is None:
+        print("[TransformYAML] Missing moving-pair slot; skipping output.")
+        return
+    if moving_slot.output_target != "view_transforms":
+        print(
+            "[TransformYAML] top-bottom output is supported only for "
+            "view_transforms; skipping YAML output."
+        )
+        return
+
+    updates = {}
+    for view_id, slot in (
+        (inference.moving_view_id, moving_slot),
+        (inference.moving_pair_view_id, pair_slot),
+    ):
+        updates[view_id] = _solve_slot_update(slot, data_affine)
+
+    print("[TransformYAML] Top-bottom solve:")
+    print(
+        "[TransformYAML] correction maps moving view data -> fixed view data"
+    )
+    print(
+        "[TransformYAML] A_new = inv(POST) @ correction @ POST @ A_old, "
+        "applied to BOTH moving-pair views"
+    )
+    print(f"[TransformYAML] Fixed view: {inference.fixed_view_id}")
+    print(
+        f"[TransformYAML] Moving pair: {inference.moving_view_id} "
+        f"(picked) + {inference.moving_pair_view_id} (partner)"
+    )
+    print(f"[TransformYAML] Moving A_old source: {moving_slot.old_source}")
+    print(f"[TransformYAML] Moving POST source: {moving_slot.post_source}")
+    print(f"[TransformYAML] Partner A_old source: {pair_slot.old_source}")
+    print(f"[TransformYAML] Partner POST source: {pair_slot.post_source}")
+    print(
+        "[TransformYAML] Keep views_alignment.yaml offsets AS THEY ARE: the "
+        "solve preserves the existing POST factors."
+    )
+    print("[TransformYAML] Copy-paste block:")
+    print("view_transforms:")
+    for view_id in sorted(updates):
+        print(f"  {view_id}:")
+        print(_format_yaml_matrix(updates[view_id]))
+
+
+def _load_point_pairs_json(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, str, str]:
+    """Load saved point-picker pairs: layer1 = fixed, layer2 = moving."""
+    import json
+
+    with path.open() as file:
+        data = json.load(file)
+    layer1 = data["layer1_name"]
+    layer2 = data["layer2_name"]
+    fixed_pts = np.asarray(data["pairs"][layer1], dtype=float)
+    moving_pts = np.asarray(data["pairs"][layer2], dtype=float)
+    if fixed_pts.shape != moving_pts.shape or fixed_pts.shape[1] != 3:
+        raise SystemExit(
+            f"{path}: expected matching (N, 3) point lists, got "
+            f"{fixed_pts.shape} and {moving_pts.shape}."
+        )
+    return fixed_pts, moving_pts, layer1, layer2
+
+
+def _warn_if_extreme(affine: np.ndarray, label: str) -> None:
+    deviation = np.abs(affine[:3, :3] - np.eye(3)).max()
+    if deviation > 0.35:
+        print(
+            f"[TransformYAML] WARNING: {label} deviates strongly from "
+            f"identity (max linear deviation {deviation:.3f}). With few or "
+            "near-coplanar points the estimator can pick a degenerate "
+            "shear/rotation; double-check the residuals per axis."
+        )
+
+
+def _run_top_bottom_rebased(
+    args: argparse.Namespace,
+    inference: TransformInference,
+    affine_estimator,
+) -> None:
+    """Headless top-bottom solve from a saved point-pairs JSON.
+
+    The pairs were picked on a dataset generated with OLD moving-pair
+    transforms (--points-project-folder / --points-transform-yaml). Each
+    view's points are first mapped into the CURRENT frame through
+    M = FULL_new @ inv(FULL_old), then the cross-pair correction is fitted
+    and folded into both moving-pair views.
+    """
+    fixed_pts, moving_pts, layer1, layer2 = _load_point_pairs_json(
+        args.point_pairs_json.expanduser()
+    )
+    print(f"[TopBottom] Loaded {len(fixed_pts)} pairs from {args.point_pairs_json}")
+    print(f"[TopBottom] fixed layer:  {layer1}")
+    print(f"[TopBottom] moving layer: {layer2}")
+
+    if inference.points_fixed_slot is None or inference.points_moving_slot is None:
+        raise SystemExit(
+            "top-bottom-rebased requires --points-project-folder (or "
+            "--points-transform-yaml) describing the dataset the points "
+            "were picked on."
+        )
+
+    rebase = {}
+    for label, new_slot, old_slot in (
+        ("fixed", inference.fixed_slot, inference.points_fixed_slot),
+        ("moving", inference.moving_slot, inference.points_moving_slot),
+    ):
+        full_new = _full_pipeline_affine(new_slot)
+        full_old = _full_pipeline_affine(old_slot)
+        rebase[label] = full_new @ np.linalg.inv(full_old)
+        print(f"[TopBottom] {label} rebase map M = FULL_new @ inv(FULL_old):")
+        print(_format_yaml_matrix(rebase[label]))
+        if np.allclose(rebase[label], _identity4(), atol=1e-9):
+            print(f"[TopBottom] {label} frame unchanged (M = identity).")
+
+    def apply(mat: np.ndarray, pts: np.ndarray) -> np.ndarray:
+        return (mat[:3, :3] @ pts.T).T + mat[:3, 3]
+
+    fixed_new = apply(rebase["fixed"], fixed_pts)
+    moving_new = apply(rebase["moving"], moving_pts)
+    print("[TopBottom] Rebased points (fixed | moving), current frame:")
+    for f_pt, m_pt in zip(fixed_new, moving_new):
+        print(
+            f"  {np.round(f_pt, 2).tolist()} | {np.round(m_pt, 2).tolist()}"
+        )
+    if args.save_rebased_points is not None:
+        import json
+
+        payload = {
+            "layer1_name": layer1,
+            "layer2_name": layer2,
+            "pairs": {
+                layer1: fixed_new.tolist(),
+                layer2: moving_new.tolist(),
+            },
+        }
+        out_path = args.save_rebased_points.expanduser()
+        with out_path.open("w") as file:
+            json.dump(payload, file, indent=2)
+        print(f"[TopBottom] Saved rebased pairs to {out_path}")
+
+    correction = affine_estimator(moving_new, fixed_new)
+    residuals = apply(correction, moving_new) - fixed_new
+    rms = float(np.sqrt((residuals**2).sum(axis=1).mean()))
+    print(
+        f"[TopBottom] Fitted correction on {len(fixed_new)} rebased pairs: "
+        f"RMS {rms:.2f} px, per-axis std "
+        f"{np.round(residuals.std(axis=0), 2).tolist()}"
+    )
+    _warn_if_extreme(correction, "fitted correction")
+    if inference.invert_estimated_affine:
+        correction = np.linalg.inv(correction)
+        print("[TopBottom] Inverted fitted affine before slot solve.")
+    _print_top_bottom_affines(correction, inference)
+
+
 def _print_yaml_ready_affine(
     manager,
     inference: TransformInference,
@@ -790,6 +999,11 @@ def _print_yaml_ready_affine(
 
     if inference.output_mode == "shared-space":
         _print_shared_space_affines(data_affine, inference)
+        return
+
+    if inference.output_mode == "top-bottom-direct":
+        _warn_if_extreme(data_affine, "estimated affine")
+        _print_top_bottom_affines(data_affine, inference)
         return
 
     slot = inference.moving_slot
@@ -1211,12 +1425,66 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-mode",
-        choices=("moving-slot", "shared-space"),
+        choices=(
+            "moving-slot",
+            "shared-space",
+            "top-bottom-direct",
+            "top-bottom-rebased",
+        ),
         default="moving-slot",
         help=(
             "Choose the YAML output. 'moving-slot' updates only the moving "
             "view/camera slot. 'shared-space' emits fixed and moving "
-            "view_transforms that move both views into a common halfway space."
+            "view_transforms that move both views into a common halfway "
+            "space (same pair). 'top-bottom-direct' aligns a moving pair "
+            "onto the fixed pair (e.g. fixed view 0, moving view 2) when "
+            "the loaded dataset was generated with the SAME transforms "
+            "being updated: the picked correction is applied to both "
+            "moving-pair views. 'top-bottom-rebased' is the headless "
+            "variant for when the moving pair already has NEW pending "
+            "transforms: point pairs are loaded from --point-pairs-json "
+            "(picked on the OLD dataset described by "
+            "--points-project-folder), rebased into the new frame, then "
+            "solved like top-bottom-direct."
+        ),
+    )
+    parser.add_argument(
+        "--point-pairs-json",
+        type=Path,
+        default=None,
+        help=(
+            "Saved point-pairs JSON (as written by the point picker) used "
+            "by --output-mode top-bottom-rebased. layer1 = fixed view, "
+            "layer2 = moving view."
+        ),
+    )
+    parser.add_argument(
+        "--points-project-folder",
+        type=Path,
+        default=None,
+        help=(
+            "impp output folder of the dataset the point pairs were picked "
+            "on (its impp_settings.yaml/views_alignment.yaml give the OLD "
+            "transforms and offsets). Used by top-bottom-rebased."
+        ),
+    )
+    parser.add_argument(
+        "--points-transform-yaml",
+        type=Path,
+        default=None,
+        help=(
+            "Alternative to --points-project-folder: transform YAML with "
+            "the view_transforms the picked dataset was generated with."
+        ),
+    )
+    parser.add_argument(
+        "--save-rebased-points",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to write the rebased point pairs as a "
+            "point-picker JSON (top-bottom-rebased only), so they can be "
+            "reloaded in the GUI on the regenerated dataset."
         ),
     )
     parser.add_argument(
@@ -1321,6 +1589,30 @@ def main() -> None:
             "--output-mode shared-space is supported only with "
             "--alignment-mode view."
         )
+    top_bottom_mode = args.output_mode in (
+        "top-bottom-direct",
+        "top-bottom-rebased",
+    )
+    if top_bottom_mode and args.alignment_mode != "view":
+        raise SystemExit(
+            f"--output-mode {args.output_mode} is supported only with "
+            "--alignment-mode view."
+        )
+    headless = args.output_mode == "top-bottom-rebased"
+    if headless and args.point_pairs_json is None:
+        raise SystemExit(
+            "--output-mode top-bottom-rebased requires --point-pairs-json "
+            "with the pairs picked on the old dataset."
+        )
+    if headless and (
+        args.points_project_folder is None
+        and args.points_transform_yaml is None
+    ):
+        raise SystemExit(
+            "--output-mode top-bottom-rebased requires "
+            "--points-project-folder (or --points-transform-yaml) "
+            "describing the dataset the points were picked on."
+        )
 
     default_moving_flip_y = args.alignment_mode == "camera"
     moving_flip_y = args.flip_moving_y or (
@@ -1333,18 +1625,29 @@ def main() -> None:
         x=args.flip_moving_x,
     )
 
-    fixed = _slice_channel(
-        fixed_data,
-        timepoint=args.timepoint,
-        channel=args.fixed_channel,
-        flips=fixed_flips,
-    )
-    moving = _slice_channel(
-        moving_data,
-        timepoint=args.timepoint,
-        channel=args.moving_channel,
-        flips=moving_flips,
-    )
+    if headless:
+        # Rebased mode never displays data: points come from the JSON in
+        # original data coordinates; only the spatial shapes are needed for
+        # the pipeline POST models (flip extents).
+        fixed = None
+        moving = None
+        fixed_shape_zyx = tuple(int(s) for s in fixed_data.shape[2:])
+        moving_shape_zyx = tuple(int(s) for s in moving_data.shape[2:])
+    else:
+        fixed = _slice_channel(
+            fixed_data,
+            timepoint=args.timepoint,
+            channel=args.fixed_channel,
+            flips=fixed_flips,
+        )
+        moving = _slice_channel(
+            moving_data,
+            timepoint=args.timepoint,
+            channel=args.moving_channel,
+            flips=moving_flips,
+        )
+        fixed_shape_zyx = tuple(fixed.shape)
+        moving_shape_zyx = tuple(moving.shape)
 
     fixed_name = (
         f"View {args.fixed_channel}: "
@@ -1417,15 +1720,22 @@ def main() -> None:
             moving_camera_id = fixed_camera_id
             moving_camera_source = f"same as fixed ({fixed_camera_source})"
 
+    moving_pair_view_id = None
+    if top_bottom_mode:
+        moving_pair_view_id = _top_bottom_partner_or_raise(
+            fixed_view_id,
+            moving_view_id,
+        )
+
     fixed_slot = None
-    if args.output_mode == "shared-space":
+    if args.output_mode == "shared-space" or top_bottom_mode:
         fixed_slot = _infer_pipeline_slot(
             alignment_mode=args.alignment_mode,
             project_folder=args.project_folder,
             transform_yaml=args.transform_yaml,
             view_id=fixed_view_id,
             camera_id=fixed_camera_id,
-            view_shape_zyx=tuple(fixed.shape),
+            view_shape_zyx=fixed_shape_zyx,
             allow_identity_old_transform=args.allow_identity_old_transform,
         )
     moving_slot = _infer_pipeline_slot(
@@ -1434,9 +1744,46 @@ def main() -> None:
         transform_yaml=args.transform_yaml,
         view_id=moving_view_id,
         camera_id=moving_camera_id,
-        view_shape_zyx=tuple(moving.shape),
+        view_shape_zyx=moving_shape_zyx,
         allow_identity_old_transform=args.allow_identity_old_transform,
     )
+    moving_pair_slot = None
+    if top_bottom_mode:
+        moving_pair_slot = _infer_pipeline_slot(
+            alignment_mode=args.alignment_mode,
+            project_folder=args.project_folder,
+            transform_yaml=args.transform_yaml,
+            view_id=moving_pair_view_id,
+            camera_id=moving_camera_id,
+            view_shape_zyx=moving_shape_zyx,
+            allow_identity_old_transform=args.allow_identity_old_transform,
+        )
+    points_fixed_slot = None
+    points_moving_slot = None
+    if headless:
+        # Slots describing the dataset the points were picked on. The
+        # loaded zarr IS that dataset, so its shapes give the old flip
+        # extents. The new-frame POST above reuses the same shapes: if a
+        # bottom view's canvas changes between runs its flip extent will be
+        # slightly off -- regenerate and re-pick to eliminate that error.
+        points_fixed_slot = _infer_pipeline_slot(
+            alignment_mode=args.alignment_mode,
+            project_folder=args.points_project_folder,
+            transform_yaml=args.points_transform_yaml,
+            view_id=fixed_view_id,
+            camera_id=fixed_camera_id,
+            view_shape_zyx=fixed_shape_zyx,
+            allow_identity_old_transform=args.allow_identity_old_transform,
+        )
+        points_moving_slot = _infer_pipeline_slot(
+            alignment_mode=args.alignment_mode,
+            project_folder=args.points_project_folder,
+            transform_yaml=args.points_transform_yaml,
+            view_id=moving_view_id,
+            camera_id=moving_camera_id,
+            view_shape_zyx=moving_shape_zyx,
+            allow_identity_old_transform=args.allow_identity_old_transform,
+        )
     transform_inference = TransformInference(
         fixed_camera_id=fixed_camera_id,
         moving_camera_id=moving_camera_id,
@@ -1449,16 +1796,22 @@ def main() -> None:
         output_inverse=args.output_inverse,
         show_full_pipeline_matrices=args.show_full_pipeline_matrices,
         shared_space_offset_mode=args.shared_space_offset_mode,
-        fixed_display_affine=_display_affine_for_flips(
-            tuple(fixed.shape),
-            fixed_flips,
+        fixed_display_affine=(
+            _identity4()
+            if headless
+            else _display_affine_for_flips(fixed_shape_zyx, fixed_flips)
         ),
-        moving_display_affine=_display_affine_for_flips(
-            tuple(moving.shape),
-            moving_flips,
+        moving_display_affine=(
+            _identity4()
+            if headless
+            else _display_affine_for_flips(moving_shape_zyx, moving_flips)
         ),
         fixed_view_source=fixed_view_source,
         moving_view_source=moving_view_source,
+        moving_pair_slot=moving_pair_slot,
+        moving_pair_view_id=moving_pair_view_id,
+        points_fixed_slot=points_fixed_slot,
+        points_moving_slot=points_moving_slot,
     )
 
     print(
@@ -1495,6 +1848,21 @@ def main() -> None:
     print(f"Moving A_old source: {moving_slot.old_source}")
     print(f"Moving POST source: {moving_slot.post_source}")
     print(f"Moving PREV source: {moving_slot.prev_source}")
+    if moving_pair_slot is not None:
+        print(f"Partner view id: {moving_pair_view_id}")
+        print(f"Partner A_old source: {moving_pair_slot.old_source}")
+        print(f"Partner POST source: {moving_pair_slot.post_source}")
+    if points_moving_slot is not None:
+        print(f"Points A_old source: {points_moving_slot.old_source}")
+        print(f"Points POST source: {points_moving_slot.post_source}")
+
+    if headless:
+        affine_estimator, estimator_label = _build_affine_estimator(
+            args.alignment_mode
+        )
+        print(f"Affine estimator: {estimator_label}")
+        _run_top_bottom_rebased(args, transform_inference, affine_estimator)
+        return
 
     viewer = napari.Viewer(title="Zarr view registration")
     viewer.add_image(
