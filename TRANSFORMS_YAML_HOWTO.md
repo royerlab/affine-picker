@@ -193,6 +193,7 @@ solves as above. Headless (no GUI):
 ```
 uv run python3 load_zarr_views_for_registration.py \
   --zarr-path /PATH/TO/OLD_PROJECT/deskewed.zarr/0 \
+  --current-zarr-path /PATH/TO/CURRENT_PROJECT/deskewed.zarr/0 \
   --fixed-channel 0 --fixed-view-id 0 \
   --moving-channel 2 --moving-view-id 2 \
   --fixed-camera-id 1 --moving-camera-id 1 \
@@ -200,22 +201,35 @@ uv run python3 load_zarr_views_for_registration.py \
   --output-mode top-bottom-rebased \
   --point-pairs-json saved_pairs_v0_v2.json \
   --project-folder /PATH/TO/PROJECT_WITH_NEW_TRANSFORMS \
+  --transform-yaml /PATH/TO/IMMUTABLE_NEW_TRANSFORM_SNAPSHOT.yaml \
   --points-project-folder /PATH/TO/OLD_PROJECT \
   --save-rebased-points rebased_pairs.json
 ```
 
 `--points-project-folder` describes the dataset the points were picked
-on (old transforms + offsets); `--project-folder` provides the new
-transforms being updated. The optional `--save-rebased-points` writes
-the pairs mapped into the new frame so they can be reloaded in the GUI
-on the regenerated dataset for fine-tuning.
+on (old transforms + offsets); `--project-folder` provides the current
+alignment metadata. Use `--transform-yaml` when the new transforms are in an
+immutable snapshot rather than that folder's live `impp_settings.yaml`; this
+avoids accidentally applying the same correction a second time after the live
+settings have been overwritten. `--current-zarr-path` supplies the regenerated
+final canvas shape used by the new pipeline transforms. The tool combines it
+with `top_bottom_offsets` to recover the pre-placement deskewed view shape,
+because views 2/3 are Y-flipped before the pipeline grows the final canvas.
+If the current Zarr does not exist yet, pass
+`--current-shape Z Y X`. When neither option is given, the tool tries
+`job.output_path` from the current project's `impp_settings.yaml` and
+stops if it cannot resolve a current shape. The optional
+`--save-rebased-points` writes the pairs mapped into the new frame so
+they can be reloaded in the GUI on the regenerated dataset for
+fine-tuning.
 
 Caveats for the rebased mode:
 
 - The rebase is purely model-based (`M = FULL_new @ inv(FULL_old)` per
-  view). It is exact for the transform change itself, but any factor
-  the model can't see (a different code checkout between runs, changed
-  canvas shapes affecting bottom-view flip extents) degrades it.
+  view). It is exact for the transform change itself when the old and
+  current final Zarr shapes and their matching `top_bottom_offsets` are
+  supplied correctly. A different code checkout
+  between runs can still introduce factors the model cannot see.
   Regenerate and verify; re-pick if residuals look wrong.
 - Point pairs are only as good as their spread: use **>= 8-10 pairs
   covering the full field in all three axes**. Near-coplanar picks

@@ -473,13 +473,78 @@ def _top_bottom_offset(
     camera_id: int | None,
 ) -> tuple[tuple[int, int, int] | None, str]:
     scoped = _offset_scope(alignment_data, camera_id)
-    offset = _offset3d(scoped.get("top_bottom_offsets"))
+    offset = _offset3d(
+        scoped.get("top_bottom_offsets") or scoped.get("offsets")
+    )
     if offset is not None:
         return offset, "top_bottom_offsets"
-    offset = _offset3d(alignment_data.get("top_bottom_offsets"))
+    offset = _offset3d(
+        alignment_data.get("top_bottom_offsets")
+        or alignment_data.get("offsets")
+    )
     if offset is not None:
         return offset, "top_bottom_offsets"
     return None, "no top_bottom_offsets"
+
+
+def _top_bottom_canvas_growth(
+    alignment_data: dict[str, Any],
+) -> tuple[int, int, int]:
+    """Return growth added after per-view flips in deskew-only output.
+
+    The processing pipeline computes the shared canvas by adding the positive
+    part of the largest top/bottom offset to the deskewed view shape.  Bottom
+    views are flipped *before* that growth.  Consequently, a final Zarr shape
+    cannot be used directly as the flip extent when any positive offset grew
+    the canvas.
+    """
+    offsets: list[tuple[int, int, int]] = []
+
+    def add_offset(scope: Any) -> None:
+        if not isinstance(scope, dict):
+            return
+        offset = _offset3d(
+            scope.get("top_bottom_offsets") or scope.get("offsets")
+        )
+        if offset is not None:
+            offsets.append(offset)
+
+    per_camera = bool(alignment_data.get("per_camera_offsets"))
+    if not per_camera:
+        add_offset(alignment_data)
+
+    camera_offsets = alignment_data.get("camera_offsets")
+    if isinstance(camera_offsets, dict):
+        for scope in camera_offsets.values():
+            add_offset(scope)
+
+    # Also support the legacy top-level camera_0/camera_1 schema.  These
+    # scopes take precedence in the processing pipeline.
+    for key, scope in alignment_data.items():
+        if str(key).startswith("camera_"):
+            add_offset(scope)
+
+    return tuple(
+        max([0, *(offset[axis] for offset in offsets)])
+        for axis in range(3)
+    )
+
+
+def _pre_top_bottom_view_shape(
+    output_shape_zyx: tuple[int, int, int],
+    alignment_data: dict[str, Any],
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Recover the per-view shape at which post-deskew flips are applied."""
+    growth = _top_bottom_canvas_growth(alignment_data)
+    view_shape = tuple(
+        int(output_shape_zyx[axis]) - growth[axis] for axis in range(3)
+    )
+    if any(size <= 0 for size in view_shape):
+        raise SystemExit(
+            "Top/bottom canvas growth is incompatible with the output shape: "
+            f"shape={output_shape_zyx}, growth={growth}."
+        )
+    return view_shape, growth
 
 
 def _camera_alignment_affine(
@@ -522,8 +587,10 @@ def _view_post_processing_affine(
 ) -> tuple[np.ndarray, str]:
     """POST factor between the view affine and the shared deskew-fuse frame.
 
-    This must reproduce exactly what the pipeline does after
-    ``resample_affine`` (and before the view-pair offset, handled separately):
+    ``shape_zyx`` is the deskewed per-view shape before the shared canvas is
+    grown for top/bottom placement.  This must reproduce what the pipeline
+    does after ``resample_affine`` (and before the view-pair offset, handled
+    separately):
 
     1. Post-deskew flips on *every* view of the camera
        (``camera_axes_to_flip_post_deskew``).
@@ -610,16 +677,21 @@ def _infer_pipeline_slot(
         camera_id,
     )
     tb_offset, tb_source = _top_bottom_offset(alignment_data, camera_id)
+    pre_placement_shape, canvas_growth = _pre_top_bottom_view_shape(
+        view_shape_zyx,
+        alignment_data,
+    )
     post_processing_affine, post_processing_source = _view_post_processing_affine(
         view_id,
-        view_shape_zyx,
+        pre_placement_shape,
         post_deskew_flip_axes,
         tb_offset,
     )
     post_affine = pair_offset_affine @ post_processing_affine
     post_source = (
         f"{post_source}; {post_processing_source} "
-        f"[{flip_source}; {alignment_source} {tb_source}]"
+        f"[pre-placement shape={pre_placement_shape}, canvas growth="
+        f"{canvas_growth}; {flip_source}; {alignment_source} {tb_source}]"
     )
 
     prev_affine, prev_source = _camera_alignment_affine(
@@ -929,7 +1001,7 @@ def _run_top_bottom_rebased(
     fixed_new = apply(rebase["fixed"], fixed_pts)
     moving_new = apply(rebase["moving"], moving_pts)
     print("[TopBottom] Rebased points (fixed | moving), current frame:")
-    for f_pt, m_pt in zip(fixed_new, moving_new):
+    for f_pt, m_pt in zip(fixed_new, moving_new, strict=True):
         print(
             f"  {np.round(f_pt, 2).tolist()} | {np.round(m_pt, 2).tolist()}"
         )
@@ -1266,8 +1338,10 @@ def _slice_channel(
     *,
     timepoint: int,
     channel: int,
-    flips: ViewFlips = ViewFlips(),
+    flips: ViewFlips | None = None,
 ) -> da.Array:
+    if flips is None:
+        flips = ViewFlips()
     if data.ndim != 5:
         raise ValueError(
             "Expected a 5D Zarr array with axes (T, C, Z, Y, X), "
@@ -1288,6 +1362,119 @@ def _slice_channel(
     if flips.x:
         volume = volume[:, :, ::-1]
     return volume.compute()
+
+
+def _spatial_shape_from_zarr(
+    zarr_path: Path,
+    *,
+    level_hint: str | None = None,
+) -> tuple[tuple[int, int, int], str]:
+    """Read a spatial shape from a Zarr array or OME-Zarr root."""
+    path = zarr_path.expanduser()
+    if not (path / ".zarray").exists():
+        candidates = []
+        if level_hint is not None:
+            candidates.append(path / level_hint)
+        candidates.append(path / "0")
+        path = next(
+            (
+                candidate
+                for candidate in candidates
+                if (candidate / ".zarray").exists()
+            ),
+            path,
+        )
+
+    try:
+        shape = tuple(int(size) for size in da.from_zarr(str(path)).shape)
+    except Exception as exc:
+        raise SystemExit(
+            f"Could not read the current-frame shape from {path}: {exc}"
+        ) from exc
+
+    if len(shape) == 5:
+        spatial_shape = shape[2:]
+    elif len(shape) == 3:
+        spatial_shape = shape
+    else:
+        raise SystemExit(
+            f"Expected a 3D or 5D current Zarr array at {path}, got shape {shape}."
+        )
+    return spatial_shape, str(path)
+
+
+def _infer_current_zarr_path(
+    project_folder: Path | None,
+) -> tuple[Path | None, str]:
+    """Find the output Zarr recorded by the current project settings."""
+    if project_folder is None:
+        return None, "no --project-folder"
+
+    settings_path = _resolve_project_yaml(
+        project_folder.expanduser(),
+        "impp_settings.yaml",
+    )
+    if settings_path is None:
+        return None, f"no impp_settings.yaml in {project_folder}"
+
+    settings = _load_yaml(settings_path)
+    job = settings.get("job")
+    output_path = job.get("output_path") if isinstance(job, dict) else None
+    if not output_path:
+        return None, f"no job.output_path in {settings_path}"
+    return Path(output_path).expanduser(), f"{settings_path} job.output_path"
+
+
+def _resolve_current_spatial_shape(
+    *,
+    current_shape: tuple[int, int, int] | list[int] | None,
+    current_zarr_path: Path | None,
+    project_folder: Path | None,
+    points_zarr_path: Path,
+) -> tuple[tuple[int, int, int], str]:
+    """Resolve the regenerated frame shape used by current pipeline slots.
+
+    ``points_zarr_path`` belongs to the old dataset and is used only to retain
+    its pyramid-level name while resolving an OME-Zarr root. It must never be
+    used as the current shape fallback: a changed Y extent changes the origin
+    of the pipeline's post-resample bottom-view flip.
+    """
+    if current_shape is not None and current_zarr_path is not None:
+        raise SystemExit(
+            "Use only one of --current-shape and --current-zarr-path."
+        )
+
+    if current_shape is not None:
+        shape = tuple(int(size) for size in current_shape)
+        if len(shape) != 3 or any(size <= 0 for size in shape):
+            raise SystemExit(
+                f"--current-shape requires three positive Z Y X values, got {shape}."
+            )
+        return shape, "--current-shape"
+
+    source = "--current-zarr-path"
+    resolved_path = current_zarr_path
+    if resolved_path is None:
+        resolved_path, source = _infer_current_zarr_path(project_folder)
+    if resolved_path is None:
+        raise SystemExit(
+            "top-bottom-rebased needs the regenerated/current canvas shape. "
+            "Pass --current-zarr-path (preferred), pass --current-shape Z Y X, "
+            "or use --project-folder with an impp_settings.yaml whose "
+            "job.output_path exists. The old --zarr-path shape cannot be reused "
+            "because the bottom-view flip extent may have changed."
+        )
+
+    level_hint = (
+        points_zarr_path.name
+        if (points_zarr_path.expanduser() / ".zarray").exists()
+        else None
+    )
+    shape, array_path = _spatial_shape_from_zarr(
+        resolved_path,
+        level_hint=level_hint,
+    )
+    return shape, f"{source}: {array_path}"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1478,6 +1665,29 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--current-zarr-path",
+        type=Path,
+        default=None,
+        help=(
+            "Regenerated/current Zarr array (or OME-Zarr root) whose spatial "
+            "shape defines the new pipeline flip extent. Used only by "
+            "top-bottom-rebased. If omitted, the tool tries job.output_path "
+            "from --project-folder."
+        ),
+    )
+    parser.add_argument(
+        "--current-shape",
+        type=int,
+        nargs=3,
+        metavar=("Z", "Y", "X"),
+        default=None,
+        help=(
+            "Explicit regenerated/current spatial shape for "
+            "top-bottom-rebased, used when the current Zarr has not been "
+            "generated yet. Mutually exclusive with --current-zarr-path."
+        ),
+    )
+    parser.add_argument(
         "--save-rebased-points",
         type=Path,
         default=None,
@@ -1627,12 +1837,23 @@ def main() -> None:
 
     if headless:
         # Rebased mode never displays data: points come from the JSON in
-        # original data coordinates; only the spatial shapes are needed for
-        # the pipeline POST models (flip extents).
+        # original data coordinates. The loaded arrays describe the OLD point
+        # frame; current pipeline slots need the independently resolved NEW
+        # canvas shape because it defines the bottom-view Y-flip extent.
         fixed = None
         moving = None
-        fixed_shape_zyx = tuple(int(s) for s in fixed_data.shape[2:])
-        moving_shape_zyx = tuple(int(s) for s in moving_data.shape[2:])
+        points_fixed_shape_zyx = tuple(int(s) for s in fixed_data.shape[2:])
+        points_moving_shape_zyx = tuple(int(s) for s in moving_data.shape[2:])
+        current_shape_zyx, current_shape_source = (
+            _resolve_current_spatial_shape(
+                current_shape=args.current_shape,
+                current_zarr_path=args.current_zarr_path,
+                project_folder=args.project_folder,
+                points_zarr_path=fixed_zarr_path,
+            )
+        )
+        fixed_shape_zyx = current_shape_zyx
+        moving_shape_zyx = current_shape_zyx
     else:
         fixed = _slice_channel(
             fixed_data,
@@ -1648,6 +1869,8 @@ def main() -> None:
         )
         fixed_shape_zyx = tuple(fixed.shape)
         moving_shape_zyx = tuple(moving.shape)
+        points_fixed_shape_zyx = fixed_shape_zyx
+        points_moving_shape_zyx = moving_shape_zyx
 
     fixed_name = (
         f"View {args.fixed_channel}: "
@@ -1761,18 +1984,16 @@ def main() -> None:
     points_fixed_slot = None
     points_moving_slot = None
     if headless:
-        # Slots describing the dataset the points were picked on. The
-        # loaded zarr IS that dataset, so its shapes give the old flip
-        # extents. The new-frame POST above reuses the same shapes: if a
-        # bottom view's canvas changes between runs its flip extent will be
-        # slightly off -- regenerate and re-pick to eliminate that error.
+        # Slots describing the dataset the points were picked on use the old
+        # loaded shapes. Current slots above use the separately resolved new
+        # shapes, so a changed bottom-view flip origin is rebased exactly.
         points_fixed_slot = _infer_pipeline_slot(
             alignment_mode=args.alignment_mode,
             project_folder=args.points_project_folder,
             transform_yaml=args.points_transform_yaml,
             view_id=fixed_view_id,
             camera_id=fixed_camera_id,
-            view_shape_zyx=fixed_shape_zyx,
+            view_shape_zyx=points_fixed_shape_zyx,
             allow_identity_old_transform=args.allow_identity_old_transform,
         )
         points_moving_slot = _infer_pipeline_slot(
@@ -1781,7 +2002,7 @@ def main() -> None:
             transform_yaml=args.points_transform_yaml,
             view_id=moving_view_id,
             camera_id=moving_camera_id,
-            view_shape_zyx=moving_shape_zyx,
+            view_shape_zyx=points_moving_shape_zyx,
             allow_identity_old_transform=args.allow_identity_old_transform,
         )
     transform_inference = TransformInference(
@@ -1853,6 +2074,11 @@ def main() -> None:
         print(f"Partner A_old source: {moving_pair_slot.old_source}")
         print(f"Partner POST source: {moving_pair_slot.post_source}")
     if points_moving_slot is not None:
+        print(f"Points frame shape: {points_moving_shape_zyx}")
+        print(
+            f"Current frame shape: {current_shape_zyx} "
+            f"({current_shape_source})"
+        )
         print(f"Points A_old source: {points_moving_slot.old_source}")
         print(f"Points POST source: {points_moving_slot.post_source}")
 
