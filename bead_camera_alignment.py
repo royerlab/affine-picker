@@ -5,28 +5,34 @@ that contain beads. It finds bead correspondences automatically, fits the same
 model the point picker's CAMERA mode fits, and prints a ready-to-paste
 ``camera_alignment`` block covering every view in one run.
 
-The model is an in-plane (Y, X) affine with Z left untouched, mapping moving
-camera voxels onto reference camera voxels. It is expressed in the frame the
-pipeline applies it in, that is, after the per-camera pre-deskew flips, and in
-the forward direction that ``canjica``'s ``resample_affine`` consumes. Paste
-the printed matrices as they are; do not negate anything.
+The model is an in-plane (Y, X) affine with Z left untouched. The fit maps
+moving-zarr voxels onto fixed-zarr voxels, in the frame the pipeline applies
+alignment in, that is, after the per-camera pre-deskew flips.
+
+Which camera the pipeline applies a ``camera_alignment`` matrix to is decided
+by enumeration order, alphabetical by serial, not by ``camera_name_to_id``
+(that mapping governs only flips and deskew transforms). On DaXi A that makes
+camera_0 = SN302483 (561 nm) and camera_1 = SN304410 (488 nm). So the printed
+block stores the INVERSE of the fit under the fixed zarr's camera key, and
+makes the moving zarr's camera the reference. Pass the enumeration ids as
+``--fixed-camera-id`` / ``--moving-camera-id``; the block is then paste-ready.
 
 Correspondences come from bead centroids in max projections over thin Z slabs.
 Projecting thins the data enough to make peak finding cheap while keeping
 crowding low, and a slab keeps the subpixel centroid of a bead intact because
 the fitted model does not touch Z.
 
-Example, DaXi A with camera 0 (488 nm) as reference:
+Example, DaXi A, fitting 561 nm onto the X-flipped 488 nm frame:
 
     uv run python3 bead_camera_alignment.py \
-      --fixed-zarr-path  $ZARR/SN304410/488nm/pos0 \
-      --moving-zarr-path $ZARR/SN302483/561nm/pos0 \
-      --moving-camera-id 1 \
+      --fixed-zarr-path  $ZARR/SN304410/488nm/pos0 --fixed-camera-id 1 \
+      --moving-zarr-path $ZARR/SN302483/561nm/pos0 --moving-camera-id 0 \
       --flip-fixed-x \
       --channels 0,1,2,3
 
 ``--flip-fixed-x`` and friends must reproduce the microscope's
-``camera_axes_to_flip_pre_deskew``: axis 1 is Y, axis 2 is X, and a camera
+``camera_axes_to_flip_pre_deskew``, which is keyed by ``camera_name_to_id``
+(SN304410 -> 0 -> flip X on DaXi A): axis 1 is Y, axis 2 is X, and a camera
 listed there needs the matching flip flag on its side of the fit. Getting this
 wrong shows up immediately as a fit that will not converge below a few pixels.
 
@@ -286,25 +292,37 @@ def estimate(
     )
 
 
-def format_yaml_block(fits: list[Fit], moving_camera_id: int, reference_camera: int) -> str:
+def stored_matrix(fit: Fit) -> np.ndarray:
+    """What goes in the YAML: the inverse of the fit.
+
+    The fit maps moving-zarr voxels onto fixed-zarr voxels, but the pipeline
+    applies the fixed zarr's camera key to the fixed camera's data, so that
+    camera must carry the inverse map. The moving camera stays the reference.
+    """
+    inverse = np.linalg.inv(fit.matrix)
+    inverse[2] = [0.0, 0.0, 1.0]
+    return inverse
+
+
+def format_yaml_block(fits: list[Fit], fixed_camera_id: int, moving_camera_id: int) -> str:
     lines = [
         "camera_alignment:",
-        f"  reference_camera: {reference_camera}",
+        f"  reference_camera: {moving_camera_id}",
         "  transforms:",
-        f"    camera_{reference_camera}:",
+        f"    camera_{moving_camera_id}:",
         f"      view_{fits[0].view_id}: &identity",
         "        - [1.0, 0.0, 0.0]",
         "        - [0.0, 1.0, 0.0]",
         "        - [0.0, 0.0, 1.0]",
     ]
     lines += [f"      view_{fit.view_id}: *identity" for fit in fits[1:]]
-    lines.append(f"    camera_{moving_camera_id}:")
+    lines.append(f"    camera_{fixed_camera_id}:")
     for fit in fits:
         lines.append(
             f"      view_{fit.view_id}:"
-            f"    # RMS {fit.rms:.2f} px, {fit.n_pairs} bead pairs"
+            f"    # inverse of fit, RMS {fit.rms:.2f} px, {fit.n_pairs} bead pairs"
         )
-        for row in fit.matrix:
+        for row in stored_matrix(fit):
             lines.append("        - [" + ", ".join(f"{value:.10f}" for value in row) + "]")
     return "\n".join(lines)
 
@@ -340,8 +358,25 @@ def parse_args() -> argparse.Namespace:
             "bottom-A, bottom-B, top-A, top-B."
         ),
     )
-    parser.add_argument("--moving-camera-id", type=int, required=True)
-    parser.add_argument("--reference-camera-id", type=int, default=0)
+    parser.add_argument(
+        "--fixed-camera-id",
+        type=int,
+        required=True,
+        help=(
+            "Pipeline camera id of the fixed zarr, in enumeration order "
+            "(alphabetical by serial; SN304410 is 1 on DaXi A). Its key "
+            "receives the inverse of the fit."
+        ),
+    )
+    parser.add_argument(
+        "--moving-camera-id",
+        type=int,
+        required=True,
+        help=(
+            "Pipeline camera id of the moving zarr, in enumeration order "
+            "(SN302483 is 0 on DaXi A). It becomes the reference camera."
+        ),
+    )
     parser.add_argument("--timepoint", type=int, default=0)
     parser.add_argument("--level", default="0", help="Multiscale level to read.")
     parser.add_argument(
@@ -434,9 +469,10 @@ def main() -> None:
         fits.append(fit)
 
     print("\n" + "=" * 72)
-    print("Paste into the microscope's transforms YAML as-is:")
+    print("Paste into the microscope's transforms YAML (already inverted for the")
+    print(f"pipeline, camera_{args.fixed_camera_id} receives it):")
     print("=" * 72)
-    print(format_yaml_block(fits, args.moving_camera_id, args.reference_camera_id))
+    print(format_yaml_block(fits, args.fixed_camera_id, args.moving_camera_id))
 
     if args.json_out is not None:
         args.json_out.write_text(
@@ -444,6 +480,7 @@ def main() -> None:
                 {
                     str(fit.view_id): {
                         "matrix": fit.matrix.tolist(),
+                        "stored_inverse": stored_matrix(fit).tolist(),
                         "rms": fit.rms,
                         "max_residual": fit.max_residual,
                         "n_pairs": fit.n_pairs,

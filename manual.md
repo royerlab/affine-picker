@@ -44,7 +44,7 @@ Then paste all matrices into one file and install it.
 > **view-pair** runs, use the `[TransformYAML] Copy-paste block:` (it is
 > correct and pastes directly). For **camera** runs, do NOT use the
 > copy-paste block or the "Equivalent embedded 4x4 (A_new)"; use the
-> **world-space affine** exactly as printed (see Step 1).
+> **inverse of the world-space affine** (see Step 1).
 
 ## Step 1 — Camera alignment
 
@@ -93,32 +93,40 @@ the flips are applied to the data, which is what the tool does) as a
  [ 0.            0.            0.            1.          ]]
 ```
 
-Take the **bottom-right 3x3** of that matrix and paste it unchanged.
-That is the camera-alignment matrix:
+Take the **bottom-right 3x3** of that matrix and **invert it** (a full
+3x3 matrix inverse, `numpy.linalg.inv`). The inverse is the
+camera-alignment matrix, and it goes under `camera_1`:
 
 ```yaml
 camera_alignment:
+  reference_camera: 0
   transforms:
-    camera_1:                     # the moving camera's id
+    camera_1:                     # SN304410 / 488 nm, see below
       view_0:
-        - [0.9942680048, -0.0104417158, 11.3612280404]
-        - [0.0094760720,  0.9945267206,  3.1706529672]
-        - [0.0000000000,  0.0000000000,  1.0000000000]
+        - [1.0056644090,  0.0105586524, -11.4590605055]
+        - [-0.0095821944, 1.0054027959,  -3.0789178625]
+        - [0.0000000000,  0.0000000000,   1.0000000000]
 ```
 
-The reference camera gets identity matrices for all views.
+`camera_0` gets identity matrices for all views.
 
-> **Do not negate the translations.** The matrix is consumed as a forward
-> map, from moving-camera voxel to reference-camera voxel, which is the
-> same direction the point picker estimates. `canjica`'s
-> `resample_affine` inverts whatever it is handed before resampling, so
-> handing it an inverted matrix moves the data the wrong way and roughly
-> doubles the mismatch instead of removing it.
-> Negating only the translation while leaving the linear part alone is an
-> approximation of that inverse, so on data it undoes nothing: measured
-> on beads through `resample_affine` itself, the forward matrix takes the
-> median bead mismatch from 6.4 px to 2.0 px, while the negated form
-> leaves it at 6.4 px.
+> **Why the inverse, and why `camera_1`.** `camera_alignment` keys are the
+> pipeline's camera enumeration, which is alphabetical by serial: on DaXi A
+> `camera_0` is SN302483 (561 nm) and `camera_1` is SN304410 (488 nm).
+> That is *not* `camera_name_to_id`, which maps SN304410 to 0 and governs
+> only the flips and deskew transforms (hence its "this is inverted" TODO).
+> The picker's world-space affine maps 561 nm onto the X-flipped 488 nm
+> frame. The pipeline applies `camera_1`'s matrix to the 488 nm data as a
+> forward map, so that camera must carry the *inverse*: 488 nm onto 561 nm,
+> with 561 nm as the untouched reference.
+>
+> The old recipe of negating just the two translation terms is this inverse
+> to first order. It is close when the linear part is near identity, but a
+> 0.6% scale difference over a 1300 px frame is 8 px, so use the exact
+> inverse. Verified on beads deskewed through the pipeline with the June
+> 2026 config, whose stored matrix is exactly this inverse: the residual
+> cross-colour offset came out at 62 px against a predicted 64 px for this
+> convention and 86 px for the alternative.
 
 > **Do not use** the `[TransformYAML] Copy-paste block:` or the
 > "Equivalent embedded 4x4 (A_new)" that the tool also prints for camera
@@ -152,16 +160,18 @@ ZARR=/hpc/instruments/royer.daxi1/JiaLe/alignment/\
 20260405_488nm_561nm_10fps_50mW_beforealignment.ome.zarr
 
 uv run python3 bead_camera_alignment.py \
-  --fixed-zarr-path  $ZARR/SN304410/488nm/pos0 \
-  --moving-zarr-path $ZARR/SN302483/561nm/pos0 \
-  --moving-camera-id 1 \
+  --fixed-zarr-path  $ZARR/SN304410/488nm/pos0 --fixed-camera-id 1 \
+  --moving-zarr-path $ZARR/SN302483/561nm/pos0 --moving-camera-id 0 \
   --flip-fixed-x \
   --channels 0,1,2,3
 ```
 
-The arguments carry the same meaning as in the GUI run: point it at the
-two position groups, name the moving camera's logical id, and set the
-flip flags to match `camera_axes_to_flip_pre_deskew`. It prints per view:
+Point it at the two position groups and set the flip flags to match
+`camera_axes_to_flip_pre_deskew`, as in the GUI run. The camera ids are
+the pipeline's enumeration ids (alphabetical by serial, so SN302483 is 0
+and SN304410 is 1 on DaXi A); the script stores the inverse of its fit
+under the fixed camera's key, which is what Step 1 does by hand. It
+prints per view:
 
 ```
 channel 0 -> view 0
@@ -270,7 +280,7 @@ camera_alignment:
       view_1: [ ...identity... ]
       view_2: [ ...identity... ]
       view_3: [ ...identity... ]
-    camera_1:                   # from Step 1 (world-space 3x3, pasted as printed)
+    camera_1:                   # from Step 1 (inverse of the world-space 3x3)
       view_0: &camera1_v0
         - [ ... ]
       view_1: *camera1_v0       # reuse via anchor if a view shares a matrix
@@ -304,10 +314,10 @@ napari before a full batch.
 ## How this process could be simplified
 
 - Make the camera-mode `[TransformYAML] Copy-paste block:` actually
-  correct (the world-space 3x3, in flipped coordinates) so both modes can
-  be copy-pasted the same way, and remove the misleading "Equivalent
-  embedded 4x4 (A_new)" whose offset carries the frame extent, or fix
-  whatever produces it.
+  correct (the inverse of the world-space 3x3, under the fixed camera's
+  enumeration key) so both modes can be copy-pasted the same way, and
+  remove the misleading "Equivalent embedded 4x4 (A_new)" whose offset
+  carries the frame extent, or fix whatever produces it.
 - Have the tool write/append the YAML directly instead of manual
   paste-and-assemble across runs; ideally one driver that runs all
   required registrations for a microscope and emits the complete file.
@@ -324,12 +334,13 @@ napari before a full batch.
 
 ## Settled questions
 
-- **Camera translation sign.** Do not negate. `camera_alignment` is
-  applied as `resample_affine(transform @ camera_align)`, and
-  `resample_affine` inverts its argument internally, so the argument is a
-  forward map. The point picker already estimates that direction. The
-  earlier negated form was a hand-rolled inverse that dropped the linear
-  part, and it leaves the cameras as misaligned as no correction at all.
+- **Camera translation sign.** Store the full inverse of the world-space
+  affine. `resample_affine` consumes a forward map, and the point picker
+  estimates 561 nm onto 488 nm, but the pipeline applies `camera_1` to the
+  488 nm camera because `camera_alignment` keys follow serial enumeration
+  order rather than `camera_name_to_id`. Negating only the translations
+  was that inverse to first order; the exact inverse also corrects the
+  scale and rotation terms, which matter at the few-pixel level.
 - **World-space vs data-space affine.** Identical whenever the flips are
   applied to the array rather than to a display transform, which is what
   the tool does. Both are in flipped coordinates, which is the frame the
