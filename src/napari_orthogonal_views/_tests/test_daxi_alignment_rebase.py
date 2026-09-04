@@ -15,18 +15,23 @@ def _write_project(
     *,
     output_path: Path | None = None,
     top_bottom_offsets: tuple[int, int, int] = (0, 0, 0),
+    pair_0_1_offset: tuple[int, int, int] = (0, 0, 0),
+    pair_2_3_offset: tuple[int, int, int] = (0, 0, 0),
+    post_deskew_flip_axes: tuple[int, ...] = (),
 ) -> None:
     identity = np.eye(4).tolist()
     settings = {
         "alignment": {
             "top_bottom_offsets": list(top_bottom_offsets),
             "view_pair_offsets": {
-                "pair_0_1": [0, 0, 0],
-                "pair_2_3": [0, 0, 0],
+                "pair_0_1": list(pair_0_1_offset),
+                "pair_2_3": list(pair_2_3_offset),
             },
         },
         "processing": {
-            "camera_axes_to_flip_post_deskew": {0: []},
+            "camera_axes_to_flip_post_deskew": {
+                0: list(post_deskew_flip_axes)
+            },
             "view_transforms": {str(view): identity for view in range(4)},
         },
     }
@@ -130,6 +135,61 @@ def test_bottom_flip_uses_shape_before_top_bottom_canvas_growth(tmp_path):
     expected[:3, 3] = [5.0, 213.0, -7.0]
     np.testing.assert_allclose(slot.post_processing_affine, expected)
     assert "pre-placement shape=(10, 24, 30)" in slot.post_source
+
+
+def test_bottom_pair_offset_is_applied_before_top_bottom_flip(tmp_path):
+    project = tmp_path / "project"
+    _write_project(
+        project,
+        top_bottom_offsets=(5, 190, -7),
+        pair_0_1_offset=(3, 12, 240),
+        pair_2_3_offset=(3, 12, 240),
+        post_deskew_flip_axes=(2,),
+    )
+
+    top_slot = registration._infer_pipeline_slot(
+        alignment_mode="view",
+        project_folder=project,
+        transform_yaml=None,
+        view_id=1,
+        camera_id=0,
+        view_shape_zyx=(15, 214, 30),
+        allow_identity_old_transform=False,
+    )
+    bottom_slot = registration._infer_pipeline_slot(
+        alignment_mode="view",
+        project_folder=project,
+        transform_yaml=None,
+        view_id=3,
+        camera_id=0,
+        view_shape_zyx=(15, 214, 30),
+        allow_identity_old_transform=False,
+    )
+
+    # Top views have no later top/bottom flip, so their configured pair
+    # offset is already expressed in output coordinates.
+    np.testing.assert_allclose(
+        top_slot.pair_offset_affine[:3, 3],
+        [3.0, 12.0, 240.0],
+    )
+
+    # The pipeline shifts view 3 before its top/bottom Y-flip. In the final
+    # output frame, the configured +12 Y shift is therefore -12. This was
+    # previously modeled as +12 and caused a 24-pixel relative displacement
+    # after pair offsets were zeroed and absorbed into view transforms.
+    np.testing.assert_allclose(
+        bottom_slot.pair_offset_affine[:3, 3],
+        [3.0, -12.0, 240.0],
+    )
+
+    pre_shape = (10, 24, 30)
+    post_flip = registration._flip_affine_for_axes(pre_shape, (2,))
+    pair_offset = registration._translation_affine((3, 12, 240))
+    placement = registration._translation_affine(
+        (5, 190, -7)
+    ) @ registration._flip_affine_for_axes(pre_shape, (1,))
+    expected_post = placement @ pair_offset @ post_flip
+    np.testing.assert_allclose(bottom_slot.post_affine, expected_post)
 
 
 def test_top_bottom_canvas_growth_matches_per_camera_pipeline_rule():

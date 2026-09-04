@@ -159,7 +159,9 @@ pair.
 The solve conjugates the picked correction through the pipeline's POST
 factors (`A_new = inv(POST) @ correction @ POST @ A_old`), so it is only
 valid if the `--project-folder` config matches what actually generated
-the loaded `deskewed.zarr`.
+the loaded `deskewed.zarr`. For the bottom pair, the pipeline applies the
+view-3 pair offset before its later top/bottom Y-flip; the solver converts
+that offset into output coordinates before splitting it across views 2/3.
 
 ## Step 3 — Cross-pair (top<->bottom) alignment
 

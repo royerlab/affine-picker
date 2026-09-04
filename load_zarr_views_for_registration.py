@@ -53,6 +53,8 @@ def _channel_label(zarr_path: Path, channel: int) -> str:
 class PipelineSlot:
     old_affine: np.ndarray
     post_affine: np.ndarray
+    # View-pair offset expressed in the final output frame. For bottom views,
+    # this is the configured offset conjugated through top/bottom placement.
     pair_offset_affine: np.ndarray
     post_processing_affine: np.ndarray
     prev_affine: np.ndarray
@@ -579,6 +581,20 @@ def _camera_alignment_affine(
     return _identity4(), f"no camera_alignment for {camera_key}.{view_key}"
 
 
+def _top_bottom_placement_affine(
+    view_id: int,
+    shape_zyx: tuple[int, int, int],
+    top_bottom_offset: tuple[int, int, int] | None,
+) -> np.ndarray:
+    """Return the pipeline factor applied after the view-pair offset."""
+    if view_id not in _BOTTOM_VIEW_IDS:
+        return _identity4()
+
+    tb_flip = _flip_affine_for_axes(shape_zyx, (1,))
+    tb_shift = _translation_affine(top_bottom_offset)
+    return tb_shift @ tb_flip
+
+
 def _view_post_processing_affine(
     view_id: int,
     shape_zyx: tuple[int, int, int],
@@ -589,13 +605,20 @@ def _view_post_processing_affine(
 
     ``shape_zyx`` is the deskewed per-view shape before the shared canvas is
     grown for top/bottom placement.  This must reproduce what the pipeline
-    does after ``resample_affine`` (and before the view-pair offset, handled
-    separately):
+    does around the view-pair offset after ``resample_affine``:
 
     1. Post-deskew flips on *every* view of the camera
        (``camera_axes_to_flip_post_deskew``).
-    2. Top/bottom placement for the inverted-objective views (2, 3): an extra
+    2. The view-pair offset (represented separately by ``PipelineSlot``).
+    3. Top/bottom placement for the inverted-objective views (2, 3): an extra
        Y-flip plus the ``top_bottom_offset`` translation.
+
+    This function omits step 2, so its combined factor is
+    ``top_bottom_placement @ post_deskew_flip``. The configured pair offset
+    is conjugated through ``top_bottom_placement`` by
+    :func:`_infer_pipeline_slot`, allowing the complete POST factor to remain
+    ``pair_offset_affine @ post_processing_affine`` without changing the
+    actual pipeline order.
 
     For the usual DaXI config (post-deskew Y-flip on all views) the two Y-flips
     cancel on the bottom views, leaving only the top/bottom offset there, while
@@ -606,10 +629,13 @@ def _view_post_processing_affine(
     transform = _flip_affine_for_axes(shape_zyx, post_deskew_flip_axes)
     notes = [f"post-deskew flip axes={tuple(post_deskew_flip_axes)}"]
 
+    top_bottom_placement = _top_bottom_placement_affine(
+        view_id,
+        shape_zyx,
+        top_bottom_offset,
+    )
+    transform = top_bottom_placement @ transform
     if view_id in _BOTTOM_VIEW_IDS:
-        tb_flip = _flip_affine_for_axes(shape_zyx, (1,))
-        tb_shift = _translation_affine(top_bottom_offset)
-        transform = tb_shift @ tb_flip @ transform
         notes.append(
             "top/bottom placement Y-flip + offset "
             f"{tuple(top_bottom_offset) if top_bottom_offset else (0, 0, 0)}"
@@ -667,7 +693,7 @@ def _infer_pipeline_slot(
         view_id,
         camera_id,
     )
-    pair_offset_affine = _translation_affine(post_offset)
+    raw_pair_offset_affine = _translation_affine(post_offset)
     if post_offset is not None:
         post_source = f"{alignment_source} {post_source}"
 
@@ -681,11 +707,28 @@ def _infer_pipeline_slot(
         view_shape_zyx,
         alignment_data,
     )
-    post_processing_affine, post_processing_source = _view_post_processing_affine(
+    post_processing_affine, post_processing_source = (
+        _view_post_processing_affine(
+            view_id,
+            pre_placement_shape,
+            post_deskew_flip_axes,
+            tb_offset,
+        )
+    )
+    top_bottom_placement = _top_bottom_placement_affine(
         view_id,
         pre_placement_shape,
-        post_deskew_flip_axes,
         tb_offset,
+    )
+    # The pipeline order is:
+    #   top/bottom placement @ pair offset @ post-deskew flip.
+    # Expressing the pair offset in output coordinates preserves that order
+    # while keeping POST factored as pair_offset @ post_processing. In
+    # particular, the bottom-view Y-flip reverses the configured Y offset.
+    pair_offset_affine = (
+        top_bottom_placement
+        @ raw_pair_offset_affine
+        @ np.linalg.inv(top_bottom_placement)
     )
     post_affine = pair_offset_affine @ post_processing_affine
     post_source = (
