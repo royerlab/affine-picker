@@ -26,8 +26,11 @@ import numpy as np
 src_path = Path(__file__).parent / "src"
 if src_path.exists():
     sys.path.insert(0, str(src_path))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # pick_projects
 
+import pick_projects  # noqa: E402
 from napari_orthogonal_views import (  # noqa: E402
+    downsampled_layer_kwargs,
     estimate_affine_from_points_components,
     estimate_affine_from_points_masked,
     show_point_picker,
@@ -806,6 +809,31 @@ def _format_camera_alignment_3x3(matrix: np.ndarray, indent: str = "        ") -
     return _format_yaml_matrix(camera_matrix, indent=indent)
 
 
+def _camera_3x3(matrix: np.ndarray) -> np.ndarray:
+    """The (Y, X) 3x3 camera-alignment matrix embedded in a 4x4."""
+    m = np.asarray(matrix, dtype=float)
+    return np.array(
+        [
+            [m[1, 1], m[1, 2], m[1, 3]],
+            [m[2, 1], m[2, 2], m[2, 3]],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+
+
+def _view_entry(view_id: int, matrix: np.ndarray, slot: PipelineSlot) -> dict:
+    return {
+        view_id: {
+            "matrix": np.asarray(matrix, dtype=float),
+            "solved_from": {
+                "a_old": slot.old_affine,
+                "a_old_source": slot.old_source,
+                "post_source": slot.post_source,
+            },
+        }
+    }
+
+
 def _normalize_homogeneous_affine(matrix: np.ndarray) -> np.ndarray:
     normalized = np.asarray(matrix, dtype=float).copy()
     normalized[-1, :] = 0.0
@@ -911,7 +939,7 @@ def _full_pipeline_affine(slot: PipelineSlot) -> np.ndarray:
 def _print_top_bottom_affines(
     data_affine: np.ndarray,
     inference: TransformInference,
-) -> None:
+) -> dict | None:
     """Apply a cross-pair correction to the moving view AND its partner.
 
     ``data_affine`` maps moving-view output coords -> fixed-view output
@@ -924,13 +952,13 @@ def _print_top_bottom_affines(
     pair_slot = inference.moving_pair_slot
     if pair_slot is None or inference.moving_pair_view_id is None:
         print("[TransformYAML] Missing moving-pair slot; skipping output.")
-        return
+        return None
     if moving_slot.output_target != "view_transforms":
         print(
             "[TransformYAML] top-bottom output is supported only for "
             "view_transforms; skipping YAML output."
         )
-        return
+        return None
 
     updates = {}
     for view_id, slot in (
@@ -965,6 +993,16 @@ def _print_top_bottom_affines(
     for view_id in sorted(updates):
         print(f"  {view_id}:")
         print(_format_yaml_matrix(updates[view_id]))
+    slots = {
+        inference.moving_view_id: moving_slot,
+        inference.moving_pair_view_id: pair_slot,
+    }
+    view_transforms = {}
+    for view_id in sorted(updates):
+        view_transforms.update(
+            _view_entry(view_id, updates[view_id], slots[view_id])
+        )
+    return {"calibration_entries": {"view_transforms": view_transforms}}
 
 
 def _load_point_pairs_json(
@@ -1002,7 +1040,7 @@ def _run_top_bottom_rebased(
     args: argparse.Namespace,
     inference: TransformInference,
     affine_estimator,
-) -> None:
+) -> dict:
     """Headless top-bottom solve from a saved point-pairs JSON.
 
     The pairs were picked on a dataset generated with OLD moving-pair
@@ -1059,6 +1097,8 @@ def _run_top_bottom_rebased(
                 layer2: moving_new.tolist(),
             },
         }
+        if _point_pairs_json_is_full_resolution(args.point_pairs_json):
+            payload["coordinate_space"] = "full_resolution_voxels"
         out_path = args.save_rebased_points.expanduser()
         with out_path.open("w") as file:
             json.dump(payload, file, indent=2)
@@ -1076,23 +1116,36 @@ def _run_top_bottom_rebased(
     if inference.invert_estimated_affine:
         correction = np.linalg.inv(correction)
         print("[TopBottom] Inverted fitted affine before slot solve.")
-    _print_top_bottom_affines(correction, inference)
+    result = _print_top_bottom_affines(correction, inference) or {}
+    result["fit"] = {
+        "pairs_used": int(len(fixed_new)),
+        "rms": rms,
+        "per_axis_std": residuals.std(axis=0),
+        "units": "voxels of the point-pairs file",
+    }
+    result["estimated_affine"] = {
+        "matrix": correction,
+        "direction": _estimated_direction(inference.invert_estimated_affine),
+    }
+    result["points_file"] = str(args.point_pairs_json.expanduser().resolve())
+    return result
 
 
 def _print_yaml_ready_affine(
     manager,
     inference: TransformInference,
-) -> None:
+) -> dict | None:
+    """Print the copy-paste block and return the same entries as data."""
     data_affine = manager.get_estimated_affine()
     if data_affine is None:
-        return
+        return None
 
     if data_affine.shape != (4, 4):
         print(
             "[TransformYAML] Expected a 4x4 3D affine, "
             f"got {data_affine.shape}; skipping YAML output."
         )
-        return
+        return None
 
     if not (
         np.allclose(inference.fixed_display_affine, _identity4())
@@ -1113,13 +1166,11 @@ def _print_yaml_ready_affine(
         print("[TransformYAML] Inverted estimated affine before slot solve.")
 
     if inference.output_mode == "shared-space":
-        _print_shared_space_affines(data_affine, inference)
-        return
+        return _print_shared_space_affines(data_affine, inference)
 
     if inference.output_mode == "top-bottom-direct":
         _warn_if_extreme(data_affine, "estimated affine")
-        _print_top_bottom_affines(data_affine, inference)
-        return
+        return _print_top_bottom_affines(data_affine, inference)
 
     slot = inference.moving_slot
     output_affine = _solve_slot_update(slot, data_affine)
@@ -1159,10 +1210,36 @@ def _print_yaml_ready_affine(
         print(_format_camera_alignment_3x3(output_affine))
         print(f"[TransformYAML] Equivalent embedded 4x4 ({output_label}):")
         print(_format_yaml_matrix(output_affine))
+        if inference.moving_camera_id is None:
+            print(
+                "[TransformYAML] No moving camera id, so the result is not "
+                "recorded as a calibration entry; pass --moving-camera-id."
+            )
+            entries = {}
+        else:
+            entries = {
+                "camera_alignment": {
+                    f"camera_{camera_id}": {
+                        f"view_{inference.moving_view_id}": {
+                            "matrix": _camera_3x3(output_affine),
+                            "solved_from": {
+                                "a_old": slot.old_affine,
+                                "a_old_source": slot.old_source,
+                                "output_inverse": inference.output_inverse,
+                            },
+                        }
+                    }
+                }
+            }
     else:
         print("view_transforms:")
         print(f"  {inference.moving_view_id}:")
         print(_format_yaml_matrix(output_affine))
+        entries = {
+            "view_transforms": _view_entry(
+                inference.moving_view_id, output_affine, slot
+            )
+        }
     if inference.show_full_pipeline_matrices and not inference.output_inverse:
         full_affine = slot.post_affine @ output_affine @ slot.prev_affine
         print(
@@ -1174,15 +1251,16 @@ def _print_yaml_ready_affine(
             "(POST @ A_new @ PREV):"
         )
         print(_format_yaml_matrix(full_affine))
+    return {"calibration_entries": entries}
 
 
 def _print_shared_space_affines(
     data_affine: np.ndarray,
     inference: TransformInference,
-) -> None:
+) -> dict | None:
     if inference.fixed_slot is None:
         print("[TransformYAML] Missing fixed slot; skipping shared-space output.")
-        return
+        return None
 
     fixed_slot = inference.fixed_slot
     moving_slot = inference.moving_slot
@@ -1192,7 +1270,7 @@ def _print_shared_space_affines(
             "[TransformYAML] Shared-space output is supported only for "
             "view_transforms; skipping YAML output."
         )
-        return
+        return None
 
     view_pair = _shared_view_pair_or_raise(
         inference.fixed_view_id,
@@ -1341,6 +1419,25 @@ def _print_shared_space_affines(
         print(_format_yaml_matrix(fixed_full))
         print(f"  {inference.moving_view_id}:")
         print(_format_yaml_matrix(moving_full))
+    result = {
+        "calibration_entries": {
+            "view_transforms": {
+                **_view_entry(inference.fixed_view_id, fixed_affine, fixed_slot),
+                **_view_entry(
+                    inference.moving_view_id, moving_affine, moving_slot
+                ),
+            }
+        }
+    }
+    if inference.shared_space_offset_mode == "split-offset":
+        result["acquisition_changes"] = {
+            "views_alignment.yaml": {
+                "view_pair_offsets": {
+                    f"pair_{view_pair[0]}_{view_pair[1]}": [0, 0, 0]
+                }
+            }
+        }
+    return result
 
 
 def _build_affine_estimator(alignment_mode: str):
@@ -1374,6 +1471,123 @@ def _build_affine_estimator(alignment_mode: str):
         )
 
     raise ValueError(f"Unsupported alignment mode: {alignment_mode}")
+
+
+@dataclass(frozen=True)
+class PyramidLevel:
+    """A level of an OME-Zarr multiscale pyramid and how it relates to 0."""
+
+    root: Path | None
+    name: str
+    # Full-resolution voxels per voxel of this level, per (Z, Y, X) axis.
+    factor: tuple[float, float, float]
+    # Every level of the pyramid as (array path, factor), finest first.
+    levels: tuple[tuple[Path, tuple[float, float, float]], ...]
+
+    @property
+    def is_full_resolution(self) -> bool:
+        return all(f == 1 for f in self.factor)
+
+
+def _pyramid_level(zarr_path: Path) -> PyramidLevel:
+    """Work out which pyramid level ``zarr_path`` is, from NGFF metadata.
+
+    ``zarr_path`` is an array inside an OME-Zarr multiscale group (for
+    example ``deskewed.zarr/2``). The factor is the ratio of the level's
+    spatial scale to level 0's. Arrays outside a multiscale group are
+    treated as full resolution.
+    """
+    path = zarr_path.expanduser()
+    attrs_path = path.parent / ".zattrs"
+    full = (1.0, 1.0, 1.0)
+    single = PyramidLevel(None, path.name, full, ((path, full),))
+    if not attrs_path.exists():
+        return single
+    try:
+        attrs = json.loads(attrs_path.read_text())
+        datasets = attrs["multiscales"][0]["datasets"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return single
+
+    def spatial_scale(dataset: dict) -> np.ndarray:
+        for transform in dataset.get("coordinateTransformations", []):
+            if transform.get("type") == "scale":
+                return np.asarray(transform["scale"], dtype=float)[-3:]
+        return np.ones(3)
+
+    base = spatial_scale(datasets[0])
+    levels = tuple(
+        (
+            path.parent / str(d["path"]),
+            tuple(float(v) for v in np.round(spatial_scale(d) / base, 6)),
+        )
+        for d in datasets
+    )
+    for level_path, factor in levels:
+        if level_path.name == path.name:
+            return PyramidLevel(path.parent, path.name, factor, levels)
+    return single
+
+
+def _full_resolution_shape(
+    level: PyramidLevel, shape_zyx: tuple[int, ...]
+) -> tuple[int, int, int]:
+    """Spatial shape of level 0, read from it when it is on disk."""
+    if level.is_full_resolution:
+        return tuple(int(s) for s in shape_zyx)
+    level0_path = level.levels[0][0]
+    try:
+        return tuple(int(s) for s in da.from_zarr(str(level0_path)).shape[-3:])
+    except Exception:  # noqa: BLE001 (fall back to the scaled shape)
+        return tuple(
+            int(round(s * f))
+            for s, f in zip(shape_zyx, level.factor, strict=True)
+        )
+
+
+def _preview_level_loader(
+    sources_by_layer: dict[str, tuple[PyramidLevel, int, ViewFlips]],
+    *,
+    timepoint: int,
+):
+    """3D-preview provider that reads a coarse pyramid level from disk.
+
+    ``sources_by_layer`` maps a layer name to its pyramid, channel and
+    flips. The provider picks the finest level whose longest spatial axis
+    fits ``max_size`` and places it in full-resolution voxels, like the
+    displayed layers.
+    """
+
+    def load(layer_name: str, max_size: int):
+        if layer_name not in sources_by_layer:
+            return None
+        level, channel, flips = sources_by_layer[layer_name]
+        if level.root is None:
+            return None
+        chosen = None
+        for level_path, factor in level.levels:
+            array = da.from_zarr(str(level_path))
+            chosen = (array, factor)
+            if max(array.shape[-3:]) <= max_size:
+                break
+        array, factor = chosen
+        volume = _slice_channel(
+            array, timepoint=timepoint, channel=channel, flips=flips
+        )
+        kwargs = downsampled_layer_kwargs(factor)
+        return volume, kwargs["scale"], kwargs["translate"]
+
+    return load
+
+
+def _point_pairs_json_is_full_resolution(path: Path | None) -> bool:
+    if path is None:
+        return False
+    try:
+        payload = json.loads(path.expanduser().read_text())
+    except (OSError, ValueError):
+        return False
+    return payload.get("coordinate_space") == "full_resolution_voxels"
 
 
 def _slice_channel(
@@ -1474,8 +1688,12 @@ def _resolve_current_spatial_shape(
     current_zarr_path: Path | None,
     project_folder: Path | None,
     points_zarr_path: Path,
+    full_resolution: bool = False,
 ) -> tuple[tuple[int, int, int], str]:
     """Resolve the regenerated frame shape used by current pipeline slots.
+
+    With ``full_resolution`` (picks saved in full-resolution voxels) a shape
+    read from a downsampled pyramid level is converted to level 0.
 
     ``points_zarr_path`` belongs to the old dataset and is used only to retain
     its pyramid-level name while resolving an OME-Zarr root. It must never be
@@ -1517,7 +1735,251 @@ def _resolve_current_spatial_shape(
         resolved_path,
         level_hint=level_hint,
     )
+    if full_resolution:
+        shape = _full_resolution_shape(_pyramid_level(Path(array_path)), shape)
     return shape, f"{source}: {array_path}"
+
+
+# ------------------------------------------------------------ pick projects
+
+
+def _base_calibration_path(args: argparse.Namespace) -> Path | None:
+    """The calibration file the results are entries of.
+
+    ``--base-calibration`` if given, else ``--transform-yaml`` when it is a
+    whole calibration file (it names a microscope).
+    """
+    if args.base_calibration is not None:
+        return args.base_calibration.expanduser().resolve()
+    if args.transform_yaml is not None:
+        path = args.transform_yaml.expanduser()
+        if path.exists() and "microscope" in _load_yaml(path):
+            return path.resolve()
+    return None
+
+
+def _start_pick_session(
+    args: argparse.Namespace,
+    *,
+    fixed_zarr_path: Path,
+    moving_zarr_path: Path,
+    fixed_level,
+    moving_level,
+    inference: TransformInference,
+    estimator_label: str,
+    fixed_flips: ViewFlips,
+    moving_flips: ViewFlips,
+    base_calibration: Path | None,
+    layer_names: tuple[str, str],
+):
+    """Open the store's pick project and start a session for this run."""
+    if args.no_pick_project:
+        return None
+    store = pick_projects.StoreProject.for_store(
+        fixed_zarr_path, args.picks_root
+    )
+    label = (
+        f"{args.alignment_mode}_{args.output_mode}_"
+        f"v{inference.fixed_view_id}-v{inference.moving_view_id}_"
+        f"c{args.fixed_channel}-c{args.moving_channel}"
+    )
+    slots = {
+        "fixed": inference.fixed_slot,
+        "moving": inference.moving_slot,
+    }
+    info = {
+        "command": [Path(sys.argv[0]).name, *sys.argv[1:]],
+        "fixed": {
+            "zarr_path": str(fixed_zarr_path),
+            "pyramid_level": fixed_level.name,
+            "channel": args.fixed_channel,
+            "view_id": inference.fixed_view_id,
+            "camera_id": inference.fixed_camera_id,
+            "flips": {"y": fixed_flips.y, "x": fixed_flips.x},
+            "layer_name": layer_names[0],
+        },
+        "moving": {
+            "zarr_path": str(moving_zarr_path),
+            "pyramid_level": moving_level.name,
+            "channel": args.moving_channel,
+            "view_id": inference.moving_view_id,
+            "camera_id": inference.moving_camera_id,
+            "flips": {"y": moving_flips.y, "x": moving_flips.x},
+            "layer_name": layer_names[1],
+        },
+        "timepoint": args.timepoint,
+        "alignment_mode": args.alignment_mode,
+        "output_mode": args.output_mode,
+        "estimator": estimator_label,
+        "a_old_sources": {
+            role: slot.old_source
+            for role, slot in slots.items()
+            if slot is not None
+        },
+        "base_calibration": (
+            None
+            if base_calibration is None
+            else {
+                "path": str(base_calibration),
+                "sha256": pick_projects.file_sha256(base_calibration),
+            }
+        ),
+        "coordinates": "full-resolution voxels",
+    }
+    session = store.new_session(label, info)
+    print(f"[PickProject] Session folder: {session.dir}")
+    if base_calibration is None:
+        print(
+            "[PickProject] No base calibration (pass --base-calibration), so "
+            "results are recorded but `pick_projects.py assemble` will need "
+            "--base."
+        )
+    return session
+
+
+def _fit_summary(widget) -> dict:
+    report = widget.refresh_fit()
+    if not report.ok:
+        return {"pairs_used": report.n_used, "error": report.error}
+    return {
+        "units": widget._units_phrase(),
+        "pairs_used": report.n_used,
+        "pairs_complete": report.n_complete,
+        "rms": report.rms,
+        "max_residual": report.residual_norms[report.max_pair],
+        "max_pair": report.max_pair,
+        "loo_rms": report.loo_rms,
+        "worst_loo_pair": report.worst_loo_pair,
+        "residuals": report.residual_norms,
+        "leave_one_out": report.out_of_sample,
+        "stability": report.stability,
+        "warnings": report.warnings,
+    }
+
+
+def _write_session_result(
+    session, result: dict, base_calibration: Path | None
+) -> Path:
+    """Write a session's result with what the base held for each entry."""
+    result = dict(result)
+    entries = result.get("calibration_entries") or {}
+    result["calibration_entries"] = pick_projects.snapshot_base_values(
+        entries, base_calibration
+    )
+    result["base_calibration"] = (
+        None
+        if base_calibration is None
+        else {
+            "path": str(base_calibration),
+            "sha256": pick_projects.file_sha256(base_calibration),
+        }
+    )
+    notes = list(result.get("notes") or [])
+    for kind, key, entry in pick_projects.iter_entries(
+        result["calibration_entries"]
+    ):
+        if kind != "view_transforms":
+            continue
+        y = float(np.asarray(entry["matrix"])[1, 3])
+        if key[0] == 2 and abs(y) > pick_projects.TOP_Y_SHIFT_MIN:
+            notes.append(
+                f"View 2's y translation ({y:.1f} rows) holds the beads' "
+                "top/bottom spacing; assembly removes it (and from view 3 when view 3 carries it too)."
+            )
+        base_value = entry.get("base_value")
+        a_old = entry.get("solved_from", {}).get("a_old")
+        if (
+            base_value is not None
+            and a_old is not None
+            and not np.allclose(np.asarray(base_value), np.asarray(a_old))
+        ):
+            notes.append(
+                f"view_transforms[{key[0]}] was solved against A_old from "
+                f"{entry['solved_from'].get('a_old_source')}, which differs "
+                "from the base calibration's entry; the new matrix composes "
+                "onto that A_old."
+            )
+    result["notes"] = notes
+    path = session.write_result(result)
+    print(f"[PickProject] Wrote {path}")
+    for note in notes:
+        print(f"[PickProject] Note: {note}")
+    return path
+
+
+def _camera_alignment_result(
+    world_affine: np.ndarray, args: argparse.Namespace, view_id: int
+) -> dict:
+    """The camera_alignment entry TRANSFORMS_YAML_HOWTO.md describes.
+
+    The config holds the inverse of the world-space fit (moving -> fixed):
+    the inverse of its (Y, X) 3x3 block. Its key is the dataset enumeration
+    id of the camera the matrix is applied to, which is not the logical id
+    in camera_name_to_id, so it is only recorded as an entry when
+    --camera-alignment-key names it.
+    """
+    matrix = np.linalg.inv(np.asarray(world_affine, dtype=float)[1:, 1:])
+    views = args.camera_alignment_views or [view_id]
+    entry = {
+        "matrix": matrix,
+        "solved_from": {
+            "recipe": "inverse of the world-space fit's (Y, X) 3x3",
+            "world_affine": world_affine,
+        },
+    }
+    if args.camera_alignment_key is None:
+        return {
+            "calibration_entries": {},
+            "unkeyed_camera_alignment": {
+                f"view_{v}": entry for v in views
+            },
+            "notes": [
+                (
+                    "Camera alignment is not recorded as a calibration entry "
+                    "without --camera-alignment-key (the dataset enumeration "
+                    "id of the camera the matrix applies to, for example "
+                    "camera_1 for SN304410 on DaXi A)."
+                )
+            ],
+        }
+    print("[PickProject] camera_alignment entry (inverse of the fit):")
+    print(f"    {args.camera_alignment_key}:")
+    for v in views:
+        print(f"      view_{v}:")
+        print(_format_yaml_matrix(matrix, indent="        "))
+    return {
+        "calibration_entries": {
+            "camera_alignment": {
+                args.camera_alignment_key: {
+                    f"view_{v}": entry for v in views
+                }
+            }
+        }
+    }
+
+
+def _on_affine_applied(
+    manager, inference, session, base_calibration, args
+) -> None:
+    result = _print_yaml_ready_affine(manager, inference)
+    if session is None or result is None:
+        return
+    widget = manager.point_picker_widget
+    if inference.moving_slot.output_target == "camera_alignment":
+        result = _camera_alignment_result(
+            widget._estimate_affine_transform(), args, inference.moving_view_id
+        )
+    result["fit"] = _fit_summary(widget)
+    result["estimated_affine"] = {
+        "matrix": manager.get_estimated_affine(),
+        "direction": "moving-to-fixed",
+        "frame": (
+            "data space of the displayed layers, in full-resolution voxels "
+            "(before display flips are undone)"
+        ),
+    }
+    result["picks_file"] = widget.autosave_path.name
+    _write_session_result(session, result, base_calibration)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1727,7 +2189,9 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Explicit regenerated/current spatial shape for "
             "top-bottom-rebased, used when the current Zarr has not been "
-            "generated yet. Mutually exclusive with --current-zarr-path."
+            "generated yet. Give it in the same voxels as the picks: level "
+            "0 for files saved in full-resolution voxels. Mutually "
+            "exclusive with --current-zarr-path."
         ),
     )
     parser.add_argument(
@@ -1801,6 +2265,48 @@ def _parse_args() -> argparse.Namespace:
             "views from different cameras."
         ),
     )
+    parser.add_argument(
+        "--base-calibration",
+        type=Path,
+        default=None,
+        help=(
+            "Calibration file (for example impp's transforms/daxi-a_DATE.yaml) "
+            "whose entries the results replace. Recorded in the session so "
+            "`pick_projects.py assemble` can write a complete calibration. "
+            "Defaults to --transform-yaml when that is a calibration file."
+        ),
+    )
+    parser.add_argument(
+        "--camera-alignment-key",
+        default=None,
+        help=(
+            "Camera mode: the camera_alignment.transforms key the result is "
+            "written under, as the dataset enumeration id of the camera the "
+            "matrix applies to (for example camera_1). Without it the "
+            "matrix is kept in result.yaml but not assembled."
+        ),
+    )
+    parser.add_argument(
+        "--camera-alignment-views",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Camera mode: views the matrix is written for (default: the "
+            "moving view), for example 0 1 when one matrix serves a pair."
+        ),
+    )
+    parser.add_argument(
+        "--picks-root",
+        type=Path,
+        default=pick_projects.PICKS_ROOT,
+        help="Where pick projects live (default: picks/ in this repository).",
+    )
+    parser.add_argument(
+        "--no-pick-project",
+        action="store_true",
+        help="Do not record a session (picks autosave to the home folder).",
+    )
     return parser.parse_args()
 
 
@@ -1826,6 +2332,8 @@ def main() -> None:
             "its own array."
         )
 
+    fixed_level = _pyramid_level(fixed_zarr_path)
+    moving_level = _pyramid_level(moving_zarr_path)
     fixed_data = da.from_zarr(str(fixed_zarr_path))
     moving_data = (
         fixed_data
@@ -1887,12 +2395,24 @@ def main() -> None:
         moving = None
         points_fixed_shape_zyx = tuple(int(s) for s in fixed_data.shape[2:])
         points_moving_shape_zyx = tuple(int(s) for s in moving_data.shape[2:])
+        if _point_pairs_json_is_full_resolution(args.point_pairs_json):
+            # Picks saved in full-resolution voxels pair with level-0 shapes
+            # whichever level --zarr-path names.
+            points_fixed_shape_zyx = _full_resolution_shape(
+                fixed_level, points_fixed_shape_zyx
+            )
+            points_moving_shape_zyx = _full_resolution_shape(
+                moving_level, points_moving_shape_zyx
+            )
         current_shape_zyx, current_shape_source = (
             _resolve_current_spatial_shape(
                 current_shape=args.current_shape,
                 current_zarr_path=args.current_zarr_path,
                 project_folder=args.project_folder,
                 points_zarr_path=fixed_zarr_path,
+                full_resolution=_point_pairs_json_is_full_resolution(
+                    args.point_pairs_json
+                ),
             )
         )
         fixed_shape_zyx = current_shape_zyx
@@ -1910,8 +2430,10 @@ def main() -> None:
             channel=args.moving_channel,
             flips=moving_flips,
         )
-        fixed_shape_zyx = tuple(fixed.shape)
-        moving_shape_zyx = tuple(moving.shape)
+        # Picks are made in full-resolution voxels at any pyramid level, so
+        # every shape the transform maths uses is the level-0 shape.
+        fixed_shape_zyx = _full_resolution_shape(fixed_level, fixed.shape)
+        moving_shape_zyx = _full_resolution_shape(moving_level, moving.shape)
         points_fixed_shape_zyx = fixed_shape_zyx
         points_moving_shape_zyx = moving_shape_zyx
 
@@ -1940,6 +2462,14 @@ def main() -> None:
         f"fixed channel {args.fixed_channel}, "
         f"moving channel {args.moving_channel}"
     )
+    for role, level in (("Fixed", fixed_level), ("Moving", moving_level)):
+        if not level.is_full_resolution:
+            print(
+                f"{role} pyramid level {level.name}: "
+                f"{level.factor} full-resolution voxels per voxel. Picks, "
+                "residuals and printed transforms are in full-resolution "
+                "voxels."
+            )
     if fixed_flip_tags:
         print(f"Fixed view flips: {', '.join(fixed_flip_tags)}")
     if moving_flip_tags:
@@ -2130,32 +2660,63 @@ def main() -> None:
             args.alignment_mode
         )
         print(f"Affine estimator: {estimator_label}")
-        _run_top_bottom_rebased(args, transform_inference, affine_estimator)
+        result = _run_top_bottom_rebased(
+            args, transform_inference, affine_estimator
+        )
+        session = _start_pick_session(
+            args,
+            fixed_zarr_path=fixed_zarr_path,
+            moving_zarr_path=moving_zarr_path,
+            fixed_level=fixed_level,
+            moving_level=moving_level,
+            inference=transform_inference,
+            estimator_label=estimator_label,
+            fixed_flips=fixed_flips,
+            moving_flips=moving_flips,
+            base_calibration=_base_calibration_path(args),
+            layer_names=(fixed_name, moving_name),
+        )
+        if session is not None:
+            _write_session_result(
+                session, result, _base_calibration_path(args)
+            )
         return
 
     viewer = napari.Viewer(title="Zarr view registration")
+    fixed_kwargs = downsampled_layer_kwargs(fixed_level.factor)
     viewer.add_image(
         fixed,
         name=fixed_name,
         colormap="green",
         blending="additive",
         contrast_limits=(0, 65535),
+        scale=fixed_kwargs["scale"],
+        translate=fixed_kwargs["translate"],
         metadata={
+            **fixed_kwargs["metadata"],
             "source_zarr": str(fixed_zarr_path),
+            "source_zarr_root": str(fixed_level.root or fixed_zarr_path),
+            "pyramid_level": fixed_level.name,
             "timepoint": args.timepoint,
             "channel": args.fixed_channel,
             "y_flipped": fixed_flips.y,
             "x_flipped": fixed_flips.x,
         },
     )
+    moving_kwargs = downsampled_layer_kwargs(moving_level.factor)
     viewer.add_image(
         moving,
         name=moving_name,
         colormap="magenta",
         blending="additive",
         contrast_limits=(0, 65535),
+        scale=moving_kwargs["scale"],
+        translate=moving_kwargs["translate"],
         metadata={
+            **moving_kwargs["metadata"],
             "source_zarr": str(moving_zarr_path),
+            "source_zarr_root": str(moving_level.root or moving_zarr_path),
+            "pyramid_level": moving_level.name,
             "timepoint": args.timepoint,
             "channel": args.moving_channel,
             "y_flipped": moving_flips.y,
@@ -2163,26 +2724,56 @@ def main() -> None:
         },
     )
 
-    viewer.dims.current_step = tuple(int(size // 2) for size in fixed.shape)
+    viewer.dims.point = tuple(
+        (np.asarray(fixed_shape_zyx, dtype=float) - 1) / 2
+    )
 
     affine_estimator, estimator_label = _build_affine_estimator(
         args.alignment_mode
     )
     print(f"Affine estimator: {estimator_label}")
 
+    base_calibration = _base_calibration_path(args)
+    session = _start_pick_session(
+        args,
+        fixed_zarr_path=fixed_zarr_path,
+        moving_zarr_path=moving_zarr_path,
+        fixed_level=fixed_level,
+        moving_level=moving_level,
+        inference=transform_inference,
+        estimator_label=estimator_label,
+        fixed_flips=fixed_flips,
+        moving_flips=moving_flips,
+        base_calibration=base_calibration,
+        layer_names=(fixed_name, moving_name),
+    )
+    picker_kwargs = {}
+    if session is not None:
+        picker_kwargs["autosave_dir"] = session.dir
     manager = show_point_picker(
         viewer,
         layer1_name=fixed_name,
         layer2_name=moving_name,
         affine_estimator=affine_estimator,
+        preview_data_provider=_preview_level_loader(
+            {
+                fixed_name: (fixed_level, args.fixed_channel, fixed_flips),
+                moving_name: (moving_level, args.moving_channel, moving_flips),
+            },
+            timepoint=args.timepoint,
+        ),
+        **picker_kwargs,
     )
+    if session is not None:
+        manager.point_picker_widget.autosave_path = session.picks_path
     manager.point_picker_widget.affine_applied.connect(
-        lambda _affine: _print_yaml_ready_affine(
-            manager,
-            transform_inference,
+        lambda _affine: _on_affine_applied(
+            manager, transform_inference, session, base_calibration, args
         )
     )
     napari.run()
+    if session is not None and session.remove_if_empty():
+        print(f"[PickProject] No picks were made; removed {session.dir}")
 
 
 if __name__ == "__main__":

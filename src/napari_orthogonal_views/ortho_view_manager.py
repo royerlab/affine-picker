@@ -31,7 +31,10 @@ from napari_orthogonal_views.ortho_view_widget import (
     OrthoViewWidget,
     activate_on_hover,
 )
-from napari_orthogonal_views.point_picker_widget import PointPickerWidget
+from napari_orthogonal_views.point_picker_widget import (
+    DEFAULT_AUTOSAVE_DIR,
+    PointPickerWidget,
+)
 from napari_orthogonal_views.screen_recorder_widget import ScreenRecorderWidget
 from napari_orthogonal_views.widget_controls import MainControlsWidget
 
@@ -87,7 +90,14 @@ class OrthoViewManager:
      QMainWindow geometry is preserved.
     """
 
-    def __init__(self, viewer: Viewer, layer1_name: str = "Image 1", layer2_name: str = "Image 2", affine_estimator=None):
+    def __init__(
+        self,
+        viewer: Viewer,
+        layer1_name: str = "Image 1",
+        layer2_name: str = "Image 2",
+        affine_estimator=None,
+        **picker_kwargs,
+    ):
         self.viewer = viewer
         self.layer1_name = layer1_name
         self.layer2_name = layer2_name
@@ -161,6 +171,7 @@ class OrthoViewManager:
             layer1_name=self.layer1_name,
             layer2_name=self.layer2_name,
             affine_estimator=affine_estimator,
+            **picker_kwargs,
         )
 
         # Build orthogonal layout (splitters + widgets)
@@ -459,6 +470,7 @@ class OrthoViewManager:
         tab_index = self.controls_tab.indexOf(self.point_picker_widget)
         if tab_index != -1:
             self.controls_tab.removeTab(tab_index)
+        self.point_picker_widget.set_canvas_overlay_active(False)
 
         # remove axis labels
         self.viewer.axes.visible = False
@@ -723,8 +735,8 @@ class OrthoViewManager:
                 splitter.splitterMoved.disconnect(handler)
         self._splitter_handlers.clear()
 
-        # Restore layer2 translate if nudge is active
-        self.point_picker_widget.cleanup_nudge()
+        # Hide the hotkey overlay and restore layer2 translate if nudged
+        self.point_picker_widget.cleanup()
 
         # Delete the extra widgets if still there
         for w in (
@@ -785,6 +797,8 @@ def show_point_picker(
     layer1_name: str = "Image 1",
     layer2_name: str = "Image 2",
     affine_estimator=None,
+    preview_data_provider=None,
+    autosave_dir=DEFAULT_AUTOSAVE_DIR,
 ) -> OrthoViewManager:
     """Show orthogonal views with the Point Picker tab active.
 
@@ -804,13 +818,27 @@ def show_point_picker(
         Function with signature ``(source_points, target_points) -> affine``
         used to estimate the affine transform.  Defaults to
         ``estimate_affine_from_points`` (full affine with scaling).
+    preview_data_provider : callable, optional
+        ``(layer_name, max_size) -> (array, scale, translate)`` returning a
+        low-resolution copy of a layer for the 3D preview, for example a
+        coarser pyramid level. Return ``None`` to stride the layer instead.
+    autosave_dir : path, optional
+        Where the picks are autosaved after every edit (``None`` disables).
+        Defaults to ``~/.napari-point-picker/autosave``.
 
     Returns
     -------
     OrthoViewManager
         The manager instance, for further programmatic access.
     """
-    m = _get_manager(viewer, layer1_name=layer1_name, layer2_name=layer2_name, affine_estimator=affine_estimator)
+    m = _get_manager(
+        viewer,
+        layer1_name=layer1_name,
+        layer2_name=layer2_name,
+        affine_estimator=affine_estimator,
+        preview_data_provider=preview_data_provider,
+        autosave_dir=autosave_dir,
+    )
 
     def _activate():
         m.show()

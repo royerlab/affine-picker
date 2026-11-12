@@ -202,3 +202,114 @@ def test_top_bottom_canvas_growth_matches_per_camera_pipeline_rule():
     }
 
     assert registration._top_bottom_canvas_growth(alignment) == (5, 9, 11)
+
+
+def _write_pyramid(root: Path, shapes, scales) -> None:
+    import json
+
+    root.mkdir()
+    datasets = []
+    for level, (shape, scale) in enumerate(zip(shapes, scales, strict=True)):
+        zarr.open(
+            str(root / str(level)), mode="w", shape=shape, dtype="uint16"
+        )
+        datasets.append(
+            {
+                "path": str(level),
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": [1, 1, *scale]}
+                ],
+            }
+        )
+    (root / ".zattrs").write_text(
+        json.dumps({"multiscales": [{"version": "0.4", "datasets": datasets}]})
+    )
+
+
+def test_pyramid_level_factor_and_full_resolution_shape(tmp_path):
+    root = tmp_path / "deskewed.zarr"
+    _write_pyramid(
+        root,
+        [(1, 2, 40, 80, 120), (1, 2, 20, 40, 60), (1, 2, 10, 20, 30)],
+        [(1.2, 0.4, 0.4), (2.4, 0.8, 0.8), (4.8, 1.6, 1.6)],
+    )
+    level = registration._pyramid_level(root / "2")
+    assert level.factor == (4.0, 4.0, 4.0)
+    assert not level.is_full_resolution
+    assert registration._full_resolution_shape(level, (10, 20, 30)) == (
+        40,
+        80,
+        120,
+    )
+    assert registration._pyramid_level(root / "0").is_full_resolution
+
+
+def test_array_outside_pyramid_is_full_resolution(tmp_path):
+    zarr.open(str(tmp_path / "plain"), mode="w", shape=(4, 4), dtype="u1")
+    assert registration._pyramid_level(tmp_path / "plain").is_full_resolution
+
+
+def test_preview_loader_picks_finest_level_that_fits(tmp_path):
+    root = tmp_path / "deskewed.zarr"
+    _write_pyramid(
+        root,
+        [(1, 2, 40, 80, 120), (1, 2, 20, 40, 60), (1, 2, 10, 20, 30)],
+        [(1, 1, 1), (2, 2, 2), (4, 4, 4)],
+    )
+    level = registration._pyramid_level(root / "0")
+    load = registration._preview_level_loader(
+        {"F": (level, 1, registration.ViewFlips())}, timepoint=0
+    )
+    volume, scale, translate = load("F", 64)
+    assert volume.shape == (20, 40, 60)
+    assert scale == (2.0, 2.0, 2.0)
+    assert translate == (0.5, 0.5, 0.5)
+    assert load("unknown layer", 64) is None
+
+
+def test_full_resolution_picks_read_current_shape_at_level_0(tmp_path):
+    root = tmp_path / "current.zarr"
+    _write_pyramid(
+        root,
+        [(1, 2, 40, 80, 120), (1, 2, 10, 20, 30)],
+        [(1, 1, 1), (4, 4, 4)],
+    )
+    shape, _ = registration._resolve_current_spatial_shape(
+        current_shape=None,
+        current_zarr_path=root / "1",
+        project_folder=None,
+        points_zarr_path=tmp_path / "old.zarr" / "1",
+        full_resolution=True,
+    )
+    assert shape == (40, 80, 120)
+
+
+def test_camera_alignment_result_matches_documented_recipe():
+    """The worked example in TRANSFORMS_YAML_HOWTO.md (camera mode)."""
+    import argparse
+
+    world = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.9942680048, -0.0104417158, 11.3612280404],
+            [0.0, 0.009476072, 0.9945267206, 3.1706529672],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    expected = [
+        [1.0056644090, 0.0105586524, -11.4590605055],
+        [-0.0095821944, 1.0054027959, -3.0789178625],
+        [0.0, 0.0, 1.0],
+    ]
+    args = argparse.Namespace(
+        camera_alignment_key="camera_1", camera_alignment_views=[0, 1]
+    )
+    result = registration._camera_alignment_result(world, args, 0)
+    entries = result["calibration_entries"]["camera_alignment"]["camera_1"]
+    assert set(entries) == {"view_0", "view_1"}
+    np.testing.assert_allclose(entries["view_0"]["matrix"], expected, atol=1e-9)
+
+    args.camera_alignment_key = None
+    unkeyed = registration._camera_alignment_result(world, args, 0)
+    assert unkeyed["calibration_entries"] == {}
+    assert "view_0" in unkeyed["unkeyed_camera_alignment"]

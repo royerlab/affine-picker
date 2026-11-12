@@ -242,7 +242,18 @@ Caveats for the rebased mode:
 
 ## Step 4 — Assemble the YAML
 
-Paste the matrices from Steps 1-3 into one file and fill in the header:
+Each run is recorded as a session under `picks/<store>/` (see the README's
+"Pick projects and calibration output"). Pass the calibration the store was
+processed with as `--base-calibration` (and, in camera mode,
+`--camera-alignment-key camera_N` with the dataset enumeration id, plus
+`--camera-alignment-views` for the views the matrix serves). Then accept the
+sessions you trust and run `python pick_projects.py assemble picks/<store>`
+to get a complete file, with the top/bottom y spacing removed from views 2
+and 3. In camera mode the recorded entry is the inverse described in Step 2,
+not the copy-paste block.
+
+To assemble by hand instead, paste the matrices from Steps 1-3 into one file
+and fill in the header:
 
 ```yaml
 microscope: daxi-a
@@ -329,8 +340,9 @@ those corrections — otherwise they are applied twice.
   `get_bottom_views`); until then both pipeline and tool must keep the
   {2,3} hardcode in lockstep.
 - Have the tool write/append the YAML directly instead of manual
-  paste-and-assemble; ideally one driver that runs all registrations
-  for a microscope and emits the complete file.
+  paste-and-assemble (done for the GUI and rebased modes: sessions plus
+  `pick_projects.py assemble`); ideally one driver that runs all
+  registrations for a microscope.
 - Remove redundant view-mode arguments: `--fixed-camera-id` /
   `--moving-camera-id` must be identical, and `--project-folder`
   duplicates the `--zarr-path` prefix.
