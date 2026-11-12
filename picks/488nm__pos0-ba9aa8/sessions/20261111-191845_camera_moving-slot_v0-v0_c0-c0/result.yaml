@@ -1,0 +1,51 @@
+# The latest applied fit of this session and the calibration
+# entries it changes. Accept it with
+#   python pick_projects.py accept /hpc/mydata/seth.hinz/ilan-nov-picker-ux/picks/488nm__pos0-ba9aa8/sessions/20261111-191845_camera_moving-slot_v0-v0_c0-c0
+# then build the calibration file with `python pick_projects.py assemble`.
+format_version: 1
+written_at: '2026-11-11T19:23:31-08:00'
+accepted: false
+calibration_entries: {}
+unkeyed_camera_alignment:
+  view_0:
+    matrix:
+    - [1.1658963246, 0.0801170158, -317.5283852899]
+    - [0.0252526826, 1.0126555767, -46.0776182957]
+    - [0.0, 0.0, 1.0]
+    solved_from:
+      recipe: inverse of the world-space fit's (Y, X) 3x3
+      world_affine:
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 0.859181494, -0.0679747971, 269.682395697]
+      - [0.0, -0.0214254857, 0.9891976788, 38.7766731816]
+      - [0.0, 0.0, 0.0, 1.0]
+notes:
+- Camera alignment is not recorded as a calibration entry without --camera-alignment-key (the dataset
+  enumeration id of the camera the matrix applies to, for example camera_1 for SN304410 on DaXi A).
+fit:
+  units: full-resolution voxels
+  pairs_used: 4
+  pairs_complete: 4
+  rms: 3.4906411224
+  max_residual: 3.9267138337
+  max_pair: 3
+  loo_rms: null
+  worst_loo_pair: null
+  residuals:
+    1: 3.3844254851
+    3: 3.9267138337
+    4: 3.0241438296
+    5: 3.5664321783
+  leave_one_out: {}
+  stability: 14.1603438435
+  warnings: []
+estimated_affine:
+  matrix:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 0.859181494, -0.0679747971, 269.682395697]
+  - [0.0, -0.0214254857, 0.9891976788, 38.7766731816]
+  - [0.0, 0.0, 0.0, 1.0]
+  direction: moving-to-fixed
+  frame: data space of the displayed layers, in full-resolution voxels (before display flips are undone)
+picks_file: picks.json
+base_calibration: null

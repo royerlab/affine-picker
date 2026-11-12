@@ -1,0 +1,13 @@
+# A bead store this folder holds picks for (no image data).
+store_path: /hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN304410/488nm/pos0
+created_at: '2026-11-11T19:18:45-08:00'
+levels:
+- path: '0'
+  shape: [1, 4, 804, 1300, 2048]
+- path: '1'
+  shape: [1, 4, 201, 325, 512]
+channels:
+- Bottom Objective, Side A | v1_c1
+- Bottom Objective, Side B | v2_c1
+- Top Objective, Side A | v3_c1
+- Top Objective, Side B | v4_c1

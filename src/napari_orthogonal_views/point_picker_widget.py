@@ -157,18 +157,60 @@ def downsampled_layer_kwargs(
 def downsample_for_preview(
     data, scale, translate, max_size: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stride ``data`` so its longest axis is at most ``max_size`` voxels.
+    """Shrink ``data`` so its longest axis is at most ``max_size`` voxels.
 
-    Returns the strided array (computed, if ``data`` is lazy) with the scale
-    and translate that keep it in the same world position.
+    Takes the maximum of each ``step``-sized block rather than striding, so
+    a bead a voxel or two wide is not dropped (it would be wherever it fell
+    between the kept voxels). Returns the result (computed, if ``data`` is
+    lazy) with the scale and translate that put each block at its centre.
     """
     step = max(1, math.ceil(max(data.shape) / max_size))
-    strided = np.asarray(data[(slice(None, None, step),) * data.ndim])
+    scale = np.asarray(scale, dtype=float)
+    translate = np.asarray(translate, dtype=float)
+    if step == 1:
+        return _finite(np.asarray(data)), scale, translate
+    if hasattr(data, "map_blocks"):  # dask: reduce chunk by chunk
+        import dask.array as da
+
+        padded = da.pad(
+            data,
+            [(0, (-n) % step) for n in data.shape],
+            mode="constant",
+        )
+        blocks = da.coarsen(
+            np.max, padded, dict.fromkeys(range(data.ndim), step)
+        ).compute()
+    else:
+        array = np.asarray(data)
+        padded = np.pad(
+            array,
+            [(0, (-n) % step) for n in array.shape],
+            mode="constant",
+        )
+        shape = []
+        for n in padded.shape:
+            shape += [n // step, step]
+        blocks = padded.reshape(shape).max(
+            axis=tuple(range(1, 2 * array.ndim, 2))
+        )
     return (
-        strided,
-        np.asarray(scale, dtype=float) * step,
-        np.asarray(translate, dtype=float),
+        _finite(np.asarray(blocks)),
+        scale * step,
+        translate + scale * (step - 1) / 2,
     )
+
+
+def _finite(array: np.ndarray) -> np.ndarray:
+    """Replace NaN with 0 and infinities with the dtype's extremes.
+
+    A stray NaN or inf (float16 stores have a few) spoils a maximum
+    intensity projection along every ray through it.
+    """
+    if np.issubdtype(array.dtype, np.floating) and not np.all(
+        np.isfinite(array)
+    ):
+        return np.nan_to_num(array, copy=True)
+    return array
 
 
 def _json_safe(value, depth: int = 0):
@@ -2337,7 +2379,7 @@ class PointPickerWidget(QWidget):
             if result is not None:
                 array, scale, translate = result
                 return (
-                    np.asarray(array),
+                    _finite(np.asarray(array)),
                     np.asarray(scale, dtype=float),
                     np.asarray(translate, dtype=float),
                 )

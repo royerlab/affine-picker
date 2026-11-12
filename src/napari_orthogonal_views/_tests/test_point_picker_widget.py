@@ -94,12 +94,20 @@ def test_stability_grows_with_pick_noise():
     fixed, moving = _pairs(n=6)
     corners = np.array([[0, 0, 0], [40, 60, 80]], dtype=float)
     small = evaluate_fit(
-        estimate_affine_from_points, fixed, moving, fixed,
-        volume_corners=corners, pick_sigma=0.1,
+        estimate_affine_from_points,
+        fixed,
+        moving,
+        fixed,
+        volume_corners=corners,
+        pick_sigma=0.1,
     )
     large = evaluate_fit(
-        estimate_affine_from_points, fixed, moving, fixed,
-        volume_corners=corners, pick_sigma=2.0,
+        estimate_affine_from_points,
+        fixed,
+        moving,
+        fixed,
+        volume_corners=corners,
+        pick_sigma=2.0,
     )
     assert 0 < small.stability < large.stability
 
@@ -459,3 +467,65 @@ def test_hotkeys_dispatch_to_picker_but_not_from_preview(picker, qtbot):
     qtbot.waitUntil(lambda: bool(picker._preview_viewers), timeout=10000)
     press(picker._preview_viewers[0], "W")
     assert picker.point_pairs[2].layer2_coords is None
+
+
+def test_preview_downsampling_keeps_single_voxel_beads():
+    from napari_orthogonal_views.point_picker_widget import (
+        downsample_for_preview,
+    )
+
+    data = np.zeros((9, 9, 9), np.float32)
+    data[3, 5, 7] = 1.0
+    out, scale, translate = downsample_for_preview(
+        data, (1, 1, 1), (0, 0, 0), 3
+    )
+    assert out.shape == (3, 3, 3) and out[1, 1, 2] == 1.0
+    np.testing.assert_allclose(scale, 3)
+    # Block 1 covers voxels 3..5, centred on 4.
+    np.testing.assert_allclose(
+        translate + scale * np.array([1, 1, 2]), (4, 4, 7)
+    )
+
+
+def test_preview_volumes_have_no_nan_or_inf():
+    from napari_orthogonal_views.point_picker_widget import (
+        downsample_for_preview,
+    )
+
+    data = np.ones((4, 4, 4), np.float16)
+    data[0, 0, 0] = np.nan
+    data[2, 2, 2] = np.inf
+    out, _, _ = downsample_for_preview(data, (1, 1, 1), (0, 0, 0), 2)
+    assert np.all(np.isfinite(out))
+    assert out[1, 1, 1] == np.finfo(np.float16).max
+
+
+def test_preview_places_moving_volume_through_linear_estimate(
+    coarse_picker, qtbot
+):
+    """World position of a voxel in the preview, not just the stored affine."""
+    affine = np.eye(4)
+    affine[:3, :3] = [[1, 0.02, 0], [0, 0.97, 0.05], [0, -0.05, 1.02]]
+    affine[:3, 3] = [12, -8, 20]
+    rng = np.random.default_rng(0)
+    for p in rng.uniform(0, 70, (8, 3)):
+        coarse_picker.add_pair(record_undo=False)
+        pair = coarse_picker.point_pairs[coarse_picker.active_pair_id]
+        pair.layer1_coords = tuple(apply_affine(affine, p[None])[0])
+        pair.layer2_coords = tuple(p)
+    coarse_picker.refresh_fit()
+    coarse_picker.preview_show_window = False
+    coarse_picker.preview_size_spin.setValue(10)  # stride 2: scale 8
+    coarse_picker.open_3d_preview(with_estimate=True)
+    qtbot.waitUntil(
+        lambda: bool(coarse_picker._preview_viewers), timeout=10000
+    )
+    moving = coarse_picker._preview_viewers[0].layers["M"]
+    peak = np.unravel_index(np.argmax(moving.data), moving.data.shape)
+    expected = apply_affine(affine, _coarse_centre((5, 6, 7))[None])[0]
+    # Downsampled 2x by block maximum: the bead is kept, at the centre of
+    # its 2x2x2 block, within half a coarse block (4 world units) of it.
+    assert moving.data.max() == 1.0
+    np.testing.assert_allclose(
+        np.asarray(moving.data_to_world(peak)), expected, atol=4.5
+    )
