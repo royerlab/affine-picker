@@ -1,0 +1,56 @@
+# The latest applied fit of this session and the calibration
+# entries it changes. Accept it with
+#   python pick_projects.py accept /hpc/mydata/seth.hinz/ilan-nov-picker-ux/picks/488nm__pos0-ba9aa8/sessions/20261111-213118_camera_moving-slot_v0-v0_c0-c0
+# then build the calibration file with `python pick_projects.py assemble`.
+format_version: 1
+written_at: '2026-11-11T21:35:24-08:00'
+accepted: false
+calibration_entries:
+  camera_alignment:
+    camera_1:
+      view_0:
+        matrix:
+        - [0.9701815494, -0.0303407652, -7.7806792168]
+        - [-0.023918454, 0.9765379655, 41.7875914632]
+        - [0.0, 0.0, 1.0]
+        solved_from:
+          recipe: inverse of the world-space fit's (Y, X) 3x3
+          world_affine:
+          - [1.0, 0.0, 0.0, 0.0]
+          - [0.0, 1.0315250459, 0.0320491987, 6.6867066667]
+          - [0.0, 0.0252652587, 1.0248107116, -42.627790469]
+          - [0.0, 0.0, 0.0, 1.0]
+        base_value:
+        - [1.004060707, 0.0117736897, -73.4265763607]
+        - [-0.0139424382, 1.0058818413, 2.693776028]
+        - [0.0, 0.0, 1.0]
+fit:
+  units: full-resolution voxels
+  pairs_used: 4
+  pairs_complete: 4
+  rms: 3.2116823139
+  max_residual: 5.2583774798
+  max_pair: 4
+  loo_rms: null
+  worst_loo_pair: null
+  residuals:
+    1: 0.1322614163
+    2: 2.0871098252
+    3: 3.0390062383
+    4: 5.2583774798
+  leave_one_out: {}
+  stability: 3.5982256906
+  warnings: []
+estimated_affine:
+  matrix:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0315250459, 0.0320491987, 6.6867066667]
+  - [0.0, 0.0252652587, 1.0248107116, -42.627790469]
+  - [0.0, 0.0, 0.0, 1.0]
+  direction: moving-to-fixed
+  frame: data space of the displayed layers, in full-resolution voxels (before display flips are undone)
+picks_file: picks.json
+base_calibration:
+  path: /hpc/scratch/group.royer/seth.hinz/imgproc-rsi/worktrees/user-zhx/impp/case_studies/zebrahubx_2026_08_05/daxi-a_2026-07-30_beadcal-0805.yaml
+  sha256: f59ad1fc04213207c321132804c24b6dc354540c2518d24ee6f9cde0f2a49f48
+notes: []

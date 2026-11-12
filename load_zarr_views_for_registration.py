@@ -1489,12 +1489,50 @@ class PyramidLevel:
         return all(f == 1 for f in self.factor)
 
 
+def _array_spatial_shape(path: Path) -> np.ndarray | None:
+    for name in (".zarray", "zarr.json"):
+        meta = path / name
+        if meta.exists():
+            shape = json.loads(meta.read_text()).get("shape")
+            return None if shape is None else np.asarray(shape[-3:], float)
+    return None
+
+
+def _level_factor(
+    shape0: np.ndarray | None,
+    shape: np.ndarray | None,
+    declared: np.ndarray,
+    level_path: Path,
+) -> tuple[float, float, float]:
+    """Full-resolution voxels per voxel of one level, from array shapes.
+
+    The shapes are what the arrays hold, so they decide; the declared NGFF
+    scale ratio is only used when a shape is unreadable. Some stores declare
+    wrong scales (one DaXi A camera store divides level 1's scale by 4
+    instead of multiplying), so a disagreement is reported, not trusted.
+    A ratio within 2% of a whole number is rounded to it.
+    """
+    if shape0 is None or shape is None or np.any(shape <= 0):
+        return tuple(float(v) for v in np.round(declared, 6))
+    ratio = shape0 / shape
+    whole = np.round(ratio)
+    ratio = np.where(np.abs(ratio - whole) <= 0.02 * whole, whole, ratio)
+    if not np.allclose(ratio, declared, rtol=0.05):
+        print(
+            f"WARNING: {level_path} declares a scale "
+            f"{tuple(np.round(declared, 4).tolist())} times level 0's, but "
+            f"its shape says {tuple(np.round(ratio, 4).tolist())}; using the "
+            "shape. The store's OME-Zarr scale metadata is wrong."
+        )
+    return tuple(float(v) for v in np.round(ratio, 6))
+
+
 def _pyramid_level(zarr_path: Path) -> PyramidLevel:
-    """Work out which pyramid level ``zarr_path`` is, from NGFF metadata.
+    """Work out which pyramid level ``zarr_path`` is.
 
     ``zarr_path`` is an array inside an OME-Zarr multiscale group (for
-    example ``deskewed.zarr/2``). The factor is the ratio of the level's
-    spatial scale to level 0's. Arrays outside a multiscale group are
+    example ``deskewed.zarr/2``). Its factor is level 0's shape over its
+    own (see ``_level_factor``). Arrays outside a multiscale group are
     treated as full resolution.
     """
     path = zarr_path.expanduser()
@@ -1516,13 +1554,22 @@ def _pyramid_level(zarr_path: Path) -> PyramidLevel:
         return np.ones(3)
 
     base = spatial_scale(datasets[0])
-    levels = tuple(
-        (
-            path.parent / str(d["path"]),
-            tuple(float(v) for v in np.round(spatial_scale(d) / base, 6)),
+    shape0 = _array_spatial_shape(path.parent / str(datasets[0]["path"]))
+    levels = []
+    for d in datasets:
+        level_path = path.parent / str(d["path"])
+        levels.append(
+            (
+                level_path,
+                _level_factor(
+                    shape0,
+                    _array_spatial_shape(level_path),
+                    spatial_scale(d) / base,
+                    level_path,
+                ),
+            )
         )
-        for d in datasets
-    )
+    levels = tuple(levels)
     for level_path, factor in levels:
         if level_path.name == path.name:
             return PyramidLevel(path.parent, path.name, factor, levels)

@@ -1,0 +1,53 @@
+# How this picking session was run.
+created_at: '2026-11-11T21:31:18-08:00'
+repo_commit: 36e38e87882e8d56e84adae2df147149c94ded3b
+command:
+- load_zarr_views_for_registration.py
+- --fixed-zarr-path
+- /hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN304410/488nm/pos0/0
+- --moving-zarr-path
+- /hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN302483/561nm/pos0/0
+- --fixed-channel
+- '0'
+- --moving-channel
+- '0'
+- --timepoint
+- '0'
+- --moving-camera-id
+- '1'
+- --flip-fixed-x
+- --no-flip-moving-y
+- --base-calibration
+- /hpc/scratch/group.royer/seth.hinz/imgproc-rsi/worktrees/user-zhx/impp/case_studies/zebrahubx_2026_08_05/daxi-a_2026-07-30_beadcal-0805.yaml
+- --camera-alignment-key
+- camera_1
+fixed:
+  zarr_path: /hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN304410/488nm/pos0/0
+  pyramid_level: '0'
+  channel: 0
+  view_id: 0
+  camera_id: null
+  flips:
+    y: false
+    x: true
+  layer_name: 'View 0: Bottom Objective, Side A | v1_c1 (X flipped)'
+moving:
+  zarr_path: /hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN302483/561nm/pos0/0
+  pyramid_level: '0'
+  channel: 0
+  view_id: 0
+  camera_id: 1
+  flips:
+    y: false
+    x: false
+  layer_name: 'View 0: Bottom Objective, Side A | v1_c1 (moving view)'
+timepoint: 0
+alignment_mode: camera
+output_mode: moving-slot
+estimator: CAMERA alignment estimator
+a_old_sources:
+  moving: camera alignment slot identity
+base_calibration:
+  path: /hpc/scratch/group.royer/seth.hinz/imgproc-rsi/worktrees/user-zhx/impp/case_studies/zebrahubx_2026_08_05/daxi-a_2026-07-30_beadcal-0805.yaml
+  sha256: f59ad1fc04213207c321132804c24b6dc354540c2518d24ee6f9cde0f2a49f48
+coordinates: full-resolution voxels

@@ -2377,12 +2377,9 @@ class PointPickerWidget(QWidget):
         if job["use_provider"] and provider is not None:
             result = provider(job["name"], max_size)
             if result is not None:
-                array, scale, translate = result
-                return (
-                    _finite(np.asarray(array)),
-                    np.asarray(scale, dtype=float),
-                    np.asarray(translate, dtype=float),
-                )
+                # The provider's level can still exceed max_size (when no
+                # level is small enough), so shrink it the rest of the way.
+                return downsample_for_preview(*result, max_size)
         return downsample_for_preview(
             job["data"], job["scale"], job["translate"], max_size
         )

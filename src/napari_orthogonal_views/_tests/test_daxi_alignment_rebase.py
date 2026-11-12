@@ -313,3 +313,18 @@ def test_camera_alignment_result_matches_documented_recipe():
     unkeyed = registration._camera_alignment_result(world, args, 0)
     assert unkeyed["calibration_entries"] == {}
     assert "view_0" in unkeyed["unkeyed_camera_alignment"]
+
+
+def test_level_factor_comes_from_shapes_when_scale_metadata_is_wrong(
+    tmp_path, capsys
+):
+    """A camera store whose level 1 declares scale / 4 instead of * 4."""
+    root = tmp_path / "pos0"
+    _write_pyramid(
+        root,
+        [(1, 1, 804, 1300, 2048), (1, 1, 201, 325, 512)],
+        [(1.24427, 0.4394, 0.4394), (0.3110675, 0.10985, 0.10985)],
+    )
+    level = registration._pyramid_level(root / "1")
+    assert level.factor == (4.0, 4.0, 4.0)
+    assert "metadata is wrong" in capsys.readouterr().out

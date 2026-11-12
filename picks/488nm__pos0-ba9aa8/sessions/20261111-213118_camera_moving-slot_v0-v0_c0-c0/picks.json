@@ -1,0 +1,176 @@
+{
+  "format_version": 2,
+  "saved_at": "2026-11-11T21:35:10-08:00",
+  "coordinate_space": "full_resolution_voxels",
+  "estimator": "estimate_affine_from_points_masked(mask=array([[False, False, False, False],\n       [False,  True,  True,  True],\n       [False,  True,  True,  True]]))",
+  "layer1_name": "View 0: Bottom Objective, Side A | v1_c1 (X flipped)",
+  "layer2_name": "View 0: Bottom Objective, Side A | v1_c1 (moving view)",
+  "sources": {
+    "View 0: Bottom Objective, Side A | v1_c1 (X flipped)": {
+      "data_shape": [
+        804,
+        1300,
+        2048
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "metadata": {
+        "full_res_origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_zarr": "/hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN304410/488nm/pos0/0",
+        "source_zarr_root": "/hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN304410/488nm/pos0",
+        "pyramid_level": "0",
+        "timepoint": 0,
+        "channel": 0,
+        "y_flipped": false,
+        "x_flipped": true
+      },
+      "full_resolution_shape": [
+        804,
+        1300,
+        2048
+      ]
+    },
+    "View 0: Bottom Objective, Side A | v1_c1 (moving view)": {
+      "data_shape": [
+        804,
+        1300,
+        2048
+      ],
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "metadata": {
+        "full_res_origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "source_zarr": "/hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN302483/561nm/pos0/0",
+        "source_zarr_root": "/hpc/instruments/royer.daxi1/JiaLe/alignment/20260805_beads_02um_488nm.ome.zarr/SN302483/561nm/pos0",
+        "pyramid_level": "0",
+        "timepoint": 0,
+        "channel": 0,
+        "y_flipped": false,
+        "x_flipped": false
+      },
+      "full_resolution_shape": [
+        804,
+        1300,
+        2048
+      ]
+    }
+  },
+  "pairs": {
+    "View 0: Bottom Objective, Side A | v1_c1 (X flipped)": [
+      [
+        402.0,
+        454.0,
+        718.0
+      ],
+      [
+        402.0,
+        1244.0,
+        585.0
+      ],
+      [
+        402.0,
+        939.0,
+        1041.0
+      ],
+      [
+        146.0,
+        1054.0,
+        847.0
+      ]
+    ],
+    "View 0: Bottom Objective, Side A | v1_c1 (moving view)": [
+      [
+        402.0,
+        411.0,
+        732.0
+      ],
+      [
+        402.0,
+        1183.0,
+        582.0
+      ],
+      [
+        402.0,
+        874.0,
+        1034.0
+      ],
+      [
+        146.0,
+        985.0,
+        847.0
+      ]
+    ]
+  },
+  "pair_records": [
+    {
+      "pair": 1,
+      "fixed": [
+        402.0,
+        454.0,
+        718.0
+      ],
+      "moving": [
+        402.0,
+        411.0,
+        732.0
+      ],
+      "use_in_fit": true
+    },
+    {
+      "pair": 2,
+      "fixed": [
+        402.0,
+        1244.0,
+        585.0
+      ],
+      "moving": [
+        402.0,
+        1183.0,
+        582.0
+      ],
+      "use_in_fit": true
+    },
+    {
+      "pair": 3,
+      "fixed": [
+        402.0,
+        939.0,
+        1041.0
+      ],
+      "moving": [
+        402.0,
+        874.0,
+        1034.0
+      ],
+      "use_in_fit": true
+    },
+    {
+      "pair": 4,
+      "fixed": [
+        146.0,
+        1054.0,
+        847.0
+      ],
+      "moving": [
+        146.0,
+        985.0,
+        847.0
+      ],
+      "use_in_fit": true
+    }
+  ]
+}
