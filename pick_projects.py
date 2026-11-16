@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Pick projects: one folder per bead store, holding its picks and results.
 
-Every run of ``load_zarr_views_for_registration.py`` opens (or creates) the
+Every run of ``pick_impp_views.py`` opens (or creates) the
 folder for its store under ``picks/`` and starts a session in it. A session
 keeps the picks (autosaved after every edit), what they were picked on, and,
 after each **Apply**, a ``result.yaml`` with the fit and the calibration

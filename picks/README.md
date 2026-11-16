@@ -1,6 +1,6 @@
 # Pick projects
 
-One folder per bead store, holding everything picked on it: the picks, how each session was run, and the calibration entries each fit produced. Text files only, no image data. `load_zarr_views_for_registration.py` creates and fills these; `pick_projects.py` lists, accepts and assembles them.
+One folder per bead store, holding everything picked on it: the picks, how each session was run, and the calibration entries each fit produced. Text files only, no image data. `pick_impp_views.py` creates and fills these; `pick_projects.py` lists, accepts and assembles them.
 
 ```
 <store>/store.yaml                              store path, pyramid shapes, channel labels

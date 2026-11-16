@@ -23,6 +23,8 @@ This plugin builds on the upstream [napari-orthogonal-views](https://github.com/
 uv add https://github.com/shinzlet/napari-orthogonal-views.git
 ```
 
+For DaXi bead calibration with impp, run `pick_impp_views.py` in impp's environment: [TRANSFORMS_YAML_HOWTO.md](TRANSFORMS_YAML_HOWTO.md) walks through it.
+
 ## Point picker & affine registration
 
 The quickest way to get started is `show_point_picker`, which opens orthogonal views with crosshairs, zoom sync, and center sync enabled, and switches to the Point Picker tab:
@@ -127,7 +129,7 @@ viewer.add_image(fixed_level2, name="Fixed", **level2)
 viewer.add_image(moving_level2, name="Moving", **level2)
 ```
 
-A coarse voxel `i` covers full-resolution voxels `4i` to `4i + 3`, so a pick on it is stored at its centre, `4i + 1.5`. `load_zarr_views_for_registration.py` does this automatically: it reads the level from the OME-Zarr metadata of `--zarr-path` (for example `deskewed.zarr/2`), and its copy-paste transform block is correct at any level.
+A coarse voxel `i` covers full-resolution voxels `4i` to `4i + 3`, so a pick on it is stored at its centre, `4i + 1.5`. `pick_impp_views.py` does this when given `--down`: it shows impp's stored halvings and keeps picks and results in level-0 voxels.
 
 ### Saving, autosave and loading
 
@@ -142,11 +144,11 @@ The **3D preview** buttons open a separate napari window with both images render
 - **Raw data** shows both images at their original positions.
 - **With current estimate** maps the moving image through the current fit, applied or not, using napari's own affine (no resampling).
 
-The preview is downsampled until its longest axis fits the size you set (384 voxels by default). By default the layers are strided. Pass `preview_data_provider=` to `show_point_picker` to supply a coarse pyramid level instead; `load_zarr_views_for_registration.py` does this, choosing the finest level that fits. Loading runs in the background, and the window opens when it is done.
+The preview is downsampled until its longest axis fits the size you set (384 voxels by default). By default the layers are strided. Pass `preview_data_provider=` to `show_point_picker` to supply a coarse pyramid level instead; `pick_impp_views.py` does this, choosing the finest stored halving that fits. Loading runs in the background, and the window opens when it is done.
 
 ### Pick projects and calibration output
 
-`load_zarr_views_for_registration.py` records every run as a session in `picks/<store>/` in this repository (see [picks/README.md](picks/README.md)). It holds small text files only, and is meant to be committed. The picks autosave into the session, and each **Apply** writes `result.yaml`, which contains:
+`pick_impp_views.py` records every run as a session in `picks/<store>/` in this repository (see [picks/README.md](picks/README.md)). It holds small text files only, and is meant to be committed. The picks autosave into the session, and each **Apply** writes `result.yaml`, which contains:
 
 - the fit: RMS, worst pair, per-pair and leave-one-out residuals, stability, warnings
 - the calibration entries the fit changes (`view_transforms[2]`, `camera_alignment.transforms.camera_1.view_0`, ...), with the A_old each was solved against
