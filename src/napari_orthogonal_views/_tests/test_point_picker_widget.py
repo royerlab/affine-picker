@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from functools import partial
 
 import numpy as np
@@ -529,3 +530,333 @@ def test_preview_places_moving_volume_through_linear_estimate(
     np.testing.assert_allclose(
         np.asarray(moving.data_to_world(peak)), expected, atol=4.5
     )
+
+
+# ---------------------------------------------------------- shift-drag nudge
+
+
+def _drag(model, start, end, modifiers=("Shift",)):
+    """Press at *start*, move through the midpoint to *end*, release."""
+    from napari.utils._test_utils import read_only_mouse_event
+    from napari.utils.interactions import (
+        mouse_move_callbacks,
+        mouse_press_callbacks,
+        mouse_release_callbacks,
+    )
+
+    def event(kind, position):
+        return read_only_mouse_event(
+            type=kind,
+            is_dragging=kind == "mouse_move",
+            modifiers=list(modifiers),
+            position=tuple(float(v) for v in position),
+        )
+
+    mouse_press_callbacks(model, event("mouse_press", start))
+    middle = (np.asarray(start) + np.asarray(end)) / 2
+    mouse_move_callbacks(model, event("mouse_move", middle))
+    mouse_move_callbacks(model, event("mouse_move", end))
+    mouse_release_callbacks(model, event("mouse_release", end))
+
+
+def test_shift_drag_nudges_moving_layer_in_displayed_axes(picker):
+    viewer = picker.viewer
+    picker.install_shift_drag(viewer)
+    moving = viewer.layers["Moving"]
+    _drag(viewer, (20, 10, 10), (20, 13.2, 6))
+    # Whole voxels of the view's grid: 3.2 rounds to 3.
+    np.testing.assert_allclose(moving.translate, (0, 3, -4))
+    np.testing.assert_allclose(
+        [s.value() for s in picker._nudge_spins], (0, 3, -4)
+    )
+    assert viewer.camera.mouse_pan
+    # A second drag adds to the first.
+    _drag(viewer, (20, 0, 0), (20, 1, 1))
+    np.testing.assert_allclose(moving.translate, (0, 4, -3))
+    np.testing.assert_allclose(viewer.layers["Fixed"].translate, 0)
+
+
+def test_drag_without_shift_leaves_moving_layer(picker):
+    picker.install_shift_drag(picker.viewer)
+    _drag(picker.viewer, (20, 10, 10), (20, 30, 30), modifiers=())
+    np.testing.assert_allclose(picker.viewer.layers["Moving"].translate, 0)
+
+
+def test_shift_drag_keeps_pairs_in_moving_image_frame(picker):
+    picker.install_shift_drag(picker.viewer)
+    _pick_translation(picker, (2, 3, -1), GRID_POINTS[:4])
+    before = {i: replace(p) for i, p in picker.point_pairs.items()}
+    affine = picker.refresh_fit().affine
+
+    _drag(picker.viewer, (20, 10, 10), (20, 15, 8))
+    assert picker.point_pairs == before
+    np.testing.assert_allclose(picker.refresh_fit().affine, affine)
+
+    # A bead at moving-image voxel p is now displayed at p + nudge; picking
+    # it there stores p, and go-to returns to where it is displayed.
+    p = np.array(GRID_POINTS[4], dtype=float)
+    nudge = np.array([0, 5, -2])
+    _pick(picker, p + (2, 3, -1), p + nudge)
+    np.testing.assert_allclose(picker.point_pairs[5].layer2_coords, p)
+    assert picker.refresh_fit().rms < 1e-6
+    picker.go_to_moving()
+    np.testing.assert_allclose(picker.viewer.dims.point, p + nudge)
+
+
+def test_shift_drag_installed_on_every_pane_while_shown(
+    make_napari_viewer, qtbot
+):
+    from napari_orthogonal_views.ortho_view_manager import (
+        _get_manager,
+        hide_orthogonal_views,
+        show_orthogonal_views,
+    )
+
+    viewer = make_napari_viewer()
+    viewer.add_image(np.zeros((40, 60, 80), np.float32), name="Image 1")
+    viewer.add_image(np.zeros((40, 60, 80), np.float32), name="Image 2")
+    m = _get_manager(viewer)
+    show_orthogonal_views(viewer)
+    qtbot.waitUntil(m.is_shown, timeout=1000)
+    picker = m.point_picker_widget
+    models = m._picker_viewer_models()
+    assert len(models) == 3
+    for model in models:
+        assert picker._shift_drag in model.mouse_drag_callbacks
+
+    # The right view shows (z, y) with x sliced: a drag there moves z and y.
+    right = m.right_widget.vm_container.viewer_model
+    x = viewer.dims.point[-1]
+    _drag(right, (10, 10, x), (14, 12, x))
+    np.testing.assert_allclose(viewer.layers["Image 2"].translate, (4, 2, 0))
+    np.testing.assert_allclose(right.layers["Image 2"].translate, (4, 2, 0))
+
+    hide_orthogonal_views(viewer)
+    qtbot.waitUntil(lambda: not m.is_shown(), timeout=1000)
+    assert picker._shift_drag not in viewer.mouse_drag_callbacks
+    m.cleanup()
+
+
+# -------------------------------------------------------------- bead filter
+
+
+def _beads(shape, seed):
+    rng = np.random.default_rng(seed)
+    volume = 150 + rng.normal(0, 10, shape)
+    for z, y, x in rng.integers(4, np.array(shape) - 4, size=(12, 3)):
+        volume[z - 1 : z + 2, y - 1 : y + 2, x - 1 : x + 2] += rng.uniform(
+            500, 20000
+        )
+    return np.clip(volume, 0, 65535).astype(np.uint16)
+
+
+@pytest.fixture
+def bead_picker(make_napari_viewer, qtbot, tmp_path):
+    viewer = make_napari_viewer()
+    shape = (40, 60, 80)
+    viewer.add_image(_beads(shape, 1), name="Fixed", contrast_limits=(0, 65535))
+    viewer.add_image(_beads(shape, 2), name="Moving", contrast_limits=(0, 65535))
+    widget = PointPickerWidget(
+        viewer, "Fixed", "Moving", autosave_dir=None, backup_dir=None
+    )
+    qtbot.addWidget(widget)
+    return widget
+
+
+def test_enhance_then_undo_restores_raw_data_and_contrast(bead_picker):
+    layers = bead_picker.viewer.layers
+    raw = {n: layers[n].data for n in ("Fixed", "Moving")}
+    layers["Moving"].gamma = 0.4
+    assert bead_picker.enhance_button.isEnabled()
+    assert not bead_picker.undo_enhance_button.isEnabled()
+
+    bead_picker.enhance_beads()
+    for name in raw:
+        assert layers[name].data is not raw[name]
+        assert layers[name].contrast_limits[1] < 65535
+    assert not bead_picker.enhance_button.isEnabled()
+    assert bead_picker.undo_enhance_button.isEnabled()
+
+    bead_picker.undo_enhance_beads()
+    for name in raw:
+        assert layers[name].data is raw[name]
+        assert tuple(layers[name].contrast_limits) == (0, 65535)
+    assert layers["Moving"].gamma == pytest.approx(0.4)
+    assert bead_picker.enhance_button.isEnabled()
+
+
+def test_enhance_and_undo_while_affine_is_applied(bead_picker):
+    _pick_translation(bead_picker, (2, 3, -1), GRID_POINTS)
+    bead_picker.refresh_fit()
+    pairs = {i: replace(p) for i, p in bead_picker.point_pairs.items()}
+    moving = bead_picker.viewer.layers["Moving"]
+    raw_source = moving.data
+    bead_picker._apply_affine()
+    applied_raw = np.asarray(moving.data).copy()
+    translate = np.array(moving.translate)
+
+    bead_picker.enhance_beads()
+    # The source is filtered and resampled through the same affine.
+    assert bead_picker.transform_snapshot["data"] is not raw_source
+    assert moving.data.shape == applied_raw.shape
+    np.testing.assert_allclose(moving.translate, translate)
+    assert not np.array_equal(np.asarray(moving.data), applied_raw)
+
+    bead_picker.undo_enhance_beads()
+    assert bead_picker.transform_snapshot["data"] is raw_source
+    np.testing.assert_array_equal(np.asarray(moving.data), applied_raw)
+    bead_picker._reset_transform()
+    assert moving.data is raw_source
+    assert bead_picker.point_pairs == pairs
+
+
+def test_reset_transform_keeps_enhanced_source(bead_picker):
+    _pick_translation(bead_picker, (2, 3, -1), GRID_POINTS)
+    bead_picker.refresh_fit()
+    moving = bead_picker.viewer.layers["Moving"]
+    raw_source = moving.data
+    bead_picker.enhance_beads()
+    enhanced = moving.data
+    bead_picker._apply_affine()
+    bead_picker._reset_transform()
+    assert moving.data is enhanced
+    bead_picker.undo_enhance_beads()
+    assert moving.data is raw_source
+
+
+def test_undo_after_reset_keep_view_shows_raw_resample(bead_picker):
+    _pick_translation(bead_picker, (2, 3, -1), GRID_POINTS)
+    bead_picker.refresh_fit()
+    moving = bead_picker.viewer.layers["Moving"]
+    bead_picker._apply_affine()
+    applied_raw = np.asarray(moving.data).copy()
+    bead_picker.enhance_beads()
+    bead_picker._restart_from_current()
+    assert bead_picker.transform_snapshot is None
+    bead_picker.undo_enhance_beads()
+    np.testing.assert_array_equal(np.asarray(moving.data), applied_raw)
+
+
+def test_colour_legend_names_fixed_and_moving_colours(bead_picker):
+    layers = bead_picker.viewer.layers
+    layers["Fixed"].colormap = "green"
+    layers["Moving"].colormap = "magenta"
+    bead_picker._update_layers_label()
+    text = bead_picker.colour_label.text()
+    assert "Fixed" in text and "green" in text and "#00ff00" in text
+    assert "Moving" in text and "magenta" in text and "#ff00ff" in text
+    assert "fixed = green, moving = magenta" in bead_picker._overlay_text()
+    layers["Moving"].colormap = "cyan"
+    bead_picker._update_canvas_overlay()
+    assert "cyan" in bead_picker.colour_label.text()
+
+
+def test_shift_drag_ignores_camera_recentring_and_crosshair_snaps(picker):
+    """Zoomed in, the view re-centres on the crosshair mid-drag; the image must
+    follow the mouse, not the camera."""
+    from napari.utils._test_utils import read_only_mouse_event
+    from napari.utils.interactions import (
+        mouse_move_callbacks,
+        mouse_press_callbacks,
+        mouse_release_callbacks,
+    )
+
+    viewer = picker.viewer
+    picker.install_shift_drag(viewer)
+    viewer.camera.zoom = 20
+
+    def event(kind, position):
+        return read_only_mouse_event(
+            type=kind,
+            is_dragging=kind == "mouse_move",
+            modifiers=["Shift"],
+            position=tuple(float(v) for v in position),
+        )
+
+    mouse_press_callbacks(viewer, event("mouse_press", (20, 10, 10)))
+    # The mouse moves 2 voxels in y and 3 in x while the camera jumps 50 in
+    # y (so the world under the mouse jumps too) and the crosshair's sliced
+    # z coordinate snaps by 0.7.
+    center = list(viewer.camera.center)
+    center[-2] += 50
+    viewer.camera.center = tuple(center)
+    mouse_move_callbacks(viewer, event("mouse_move", (20.7, 62, 13)))
+    mouse_release_callbacks(viewer, event("mouse_release", (20.7, 62, 13)))
+    np.testing.assert_allclose(viewer.layers["Moving"].translate, (0, 2, 3))
+
+
+def test_crosshair_move_in_view_does_not_recentre_ortho_camera(
+    make_napari_viewer, qtbot
+):
+    """With a layer extent that does not start at 0 (here -40, as after a
+    nudge), a crosshair move inside a zoomed-in ortho view keeps its camera."""
+    from napari_orthogonal_views.ortho_view_manager import (
+        _get_manager,
+        show_orthogonal_views,
+    )
+
+    viewer = make_napari_viewer()
+    viewer.add_image(
+        np.zeros((40, 60, 80), np.float32), translate=(-40, -40, -40)
+    )
+    m = _get_manager(viewer)
+    show_orthogonal_views(viewer)
+    qtbot.waitUntil(m.is_shown, timeout=1000)
+    viewer.dims.point = (-20, 0, 0)
+    bottom = m.bottom_widget.vm_container.viewer_model  # shows (z, x)
+    center = list(bottom.camera.center)
+    center[-2:] = [-20, 0]
+    bottom.camera.center = tuple(center)
+    bottom.camera.zoom = 50  # a few world units in view
+    viewer.dims.point = (-20, 0, 1)  # x moves 1, still in view
+    np.testing.assert_allclose(bottom.camera.center[-2:], (-20, 0))
+    m.cleanup()
+
+
+def test_enhance_auto_contrasts_the_shown_slice_and_sets_gamma(bead_picker):
+    viewer = bead_picker.viewer
+    viewer.dims.point = (12, 30, 40)
+    bead_picker.enhance_beads()
+    for name in ("Fixed", "Moving"):
+        layer = viewer.layers[name]
+        plane = np.asarray(layer.data[viewer.dims.current_step[0]])
+        assert tuple(layer.contrast_limits) == pytest.approx(
+            (plane.min(), plane.max())
+        )
+        assert layer.gamma == pytest.approx(0.5)
+
+
+def test_nudge_does_not_pull_zoomed_cameras_to_the_crosshair(
+    make_napari_viewer, qtbot
+):
+    """Zoomed in away from the crosshair, moving the moving layer (which
+    re-indexes the crosshair's step) must leave every camera where it is."""
+    from napari_orthogonal_views.ortho_view_manager import (
+        _get_manager,
+        show_orthogonal_views,
+    )
+
+    viewer = make_napari_viewer()
+    viewer.add_image(np.zeros((40, 60, 80), np.float32), name="Image 1")
+    viewer.add_image(np.zeros((40, 60, 80), np.float32), name="Image 2")
+    m = _get_manager(viewer)
+    show_orthogonal_views(viewer)
+    qtbot.waitUntil(m.is_shown, timeout=1000)
+    picker = m.point_picker_widget
+    viewer.dims.point = (20, 30, 40)
+    models = m._picker_viewer_models()
+    for model in models:
+        center = list(model.camera.center)
+        center[-2:] = [center[-2] + 15, center[-1] + 15]  # away from crosshair
+        model.camera.center = tuple(center)
+        model.camera.zoom = 50
+    before = [tuple(model.camera.center) for model in models]
+    for offset in ([0, -3, 0], [0, -7, -4], [-2, -7, -4], [0, 2.4, 0]):
+        picker.set_nudge_offset(offset)
+    for model, centre in zip(models, before, strict=True):
+        np.testing.assert_allclose(model.camera.center, centre)
+    # A real crosshair move out of view still brings the ortho views to it.
+    bottom = m.bottom_widget.vm_container.viewer_model  # shows (z, x)
+    viewer.dims.point = (5, 30, 70)
+    assert bottom.camera.center[-1] == pytest.approx(70, abs=1)
+    m.cleanup()

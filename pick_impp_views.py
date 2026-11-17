@@ -298,6 +298,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--picks", type=Path, help="a picks JSON to load into the table")
     parser.add_argument("--picks-root", type=Path, default=pick_projects.PICKS_ROOT)
     parser.add_argument("--no-pick-project", action="store_true", help="record no session")
+    parser.add_argument("--display-filter", choices=("beads", "none"), default="beads",
+                        help="'beads' (default) opens with Enhance Beads on: background, noise floor and isolated voxels "
+                             "removed, then auto-contrast at gamma 0.5; 'none' opens on the stored values. Either can be "
+                             "switched in the Point Picker tab; picks and fits are the same")
     return parser.parse_args(argv)
 
 
@@ -338,6 +342,8 @@ def main(argv=None) -> None:
         widget.autosave_path = context["session"].picks_path
     if args.picks is not None:
         widget.load_points(str(args.picks))
+    if args.display_filter == "beads":
+        widget.enhance_beads()  # the button's own path, so Undo Enhance restores the stored values
     widget.affine_applied.connect(lambda _affine: on_apply(manager, context))
     napari.run()
     if context["session"] is not None and context["session"].remove_if_empty():

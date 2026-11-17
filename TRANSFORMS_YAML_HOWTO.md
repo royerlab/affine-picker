@@ -49,7 +49,9 @@ windows. `PICK=external/napari-orthogonal-views`.
    Prefix each with `pixi run python $PICK/`. Pick 8 to 10 or more beads spread over the whole field in z, y and x
    (near-coplanar picks leave shear and rotation unconstrained), watch the live residuals, and press **Apply**. Each
    Apply writes the session's `result.yaml` and prints the entries. The camera reference camera's alignment is always
-   identity: make the reference camera A.
+   identity: make the reference camera A. The window opens with **Enhance Beads** on (background removed; **Undo
+   Enhance** shows the stored values), A in green and B in magenta. Shift+drag slides B to compare a bead pair by eye
+   without changing the picks, and **C** switches the view under the main one between xz and yz.
 
    Fit cameras first. Picks measure against the matrices the project deskewed with, so a view fit made on a project
    whose camera alignment then changes still holds (camera alignment acts before deskew, view matrices after), but a

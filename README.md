@@ -77,7 +77,7 @@ Built-in estimators:
 
 ### Picking pairs
 
-The Point Picker tab lists every pair with its fixed and moving coordinates, and refits the affine after each edit, so you can judge the fit before resampling anything.
+The Point Picker tab lists every pair with its fixed and moving coordinates, and refits the affine after each edit, so you can judge the fit before resampling anything. Its top line says which colour is which image (for example **Fixed** is green, **Moving** is magenta), read from the layers' colormaps; the canvas overlay repeats it.
 
 1. Navigate to a bead in the fixed image and press **T** to move the crosshair to the mouse. Refine it in the orthogonal views if needed.
 2. Press **Q** to store the crosshair as the active pair's fixed point (a pair is created if there is none).
@@ -97,8 +97,12 @@ The hotkeys are listed at the top of the tab and, by default, on the canvas toge
 | [ / ] | Previous / next pair |
 | U | Use or skip the active pair in the fit |
 | Ctrl+Z | Undo the last add, set, delete, skip or load |
+| Shift+drag | Slide the moving image in that view's two axes |
+| C | Switch the view under the main view between xz and yz |
 
 The **Show** and **Update** buttons in each row do the same as the go-to and store keys for that row.
+
+Shift+drag works in the main view and the orthogonal view, moves the image in whole voxels of the view, and adds to the **Nudge Offset** below the table (**Reset Nudge** puts the image back). The nudge only moves the image on screen. A moving point is stored at its position in the moving image, so the pairs, the fit and saved picks are the same whatever the nudge. Use it to bring a bead pair close enough to compare by eye before picking.
 
 ### Judging the fit
 
@@ -130,6 +134,23 @@ viewer.add_image(moving_level2, name="Moving", **level2)
 ```
 
 A coarse voxel `i` covers full-resolution voxels `4i` to `4i + 3`, so a pick on it is stored at its centre, `4i + 1.5`. `pick_impp_views.py` does this when given `--down`: it shows impp's stored halvings and keeps picks and results in level-0 voxels.
+
+### Making beads easier to see
+
+Bead views have a background of a few hundred counts, with a gradient along the light sheet, while the beads range from about 1,000 counts to saturation. On fixed 0 to 65,535 contrast limits most beads sit at a few percent of the range, and lowering gamma to find them lifts the background too. `enhance_beads` removes the background for display:
+
+```python
+from napari_orthogonal_views.bead_display import DISPLAY_GAMMA, enhance_beads
+
+shown, limits = enhance_beads(volume, level_factor=4)  # level_factor: the pyramid level's downsampling
+viewer.add_image(shown, contrast_limits=limits, gamma=DISPLAY_GAMMA, **downsampled_layer_kwargs(4))
+```
+
+It subtracts each 8 x 32 x 32 block's 10th percentile (in full-resolution voxels; beads are too sparse to move it), interpolated linearly between blocks, then a floor one noise standard deviation above the typical background, and clips at zero. About 85% of the background comes out black; most of the rest is isolated voxels, so any voxel with fewer than 8 of its 26 neighbours above zero is set to zero too (a bead is a connected blob and keeps its sharp apex, which a median filter would blur). It also returns contrast limits up to the 99.95th percentile of the result. Bead positions do not change, so picks and fits are the same as on the raw data. A full-resolution view (800 x 1300 x 2048) takes about 12 s.
+
+At the top of the Point Picker tab, **Enhance Beads** applies it to both images, then auto-contrasts them (like the layer controls' **once** button, the range of the shown slice) and sets gamma to 0.5. **Undo Enhance** restores the raw data and the contrast and gamma you had. Both work at any point. While an affine is applied, the moving image's source (what **Apply** resamples from) is filtered or restored and the applied affine is resampled again, which takes as long as an **Apply**; **Reset Transform** and **Reset (keep view)** then keep the state you chose. The raw data stays in memory while the filter is on, so each image takes twice its memory.
+
+`pick_impp_views.py` opens with Enhance Beads on; `--display-filter none` opens on the stored values.
 
 ### Saving, autosave and loading
 
@@ -211,7 +232,7 @@ from napari_orthogonal_views.ortho_view_manager import show_orthogonal_views
 show_orthogonal_views(viewer)
 ```
 
-The view panes can be resized by dragging the splitter handles. Pressing **T** centers all views on the mouse position. All events (including label painting) are synced across views via a shared data array.
+The main (xy) view fills the top of the left column, and one orthogonal view sits under it: xz by default, or yz. Press **C** with the mouse over a view, or use the button in the Controls tab, to switch between them. The settings tabs (Controls, Screen Recorder, Point Picker) fill the right column. The panes can be resized by dragging the splitter handles. Screenshots and recordings can include either orthogonal view, shown or not. Pressing **T** centers all views on the mouse position. All events (including label painting) are synced across views via a shared data array.
 
 ### Syncing properties
 

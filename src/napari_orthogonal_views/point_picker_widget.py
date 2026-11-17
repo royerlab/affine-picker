@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import getpass
 import html
@@ -22,6 +23,7 @@ from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -39,6 +41,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from napari_orthogonal_views.bead_display import DISPLAY_GAMMA, enhance_beads
 from napari_orthogonal_views.fit_diagnostics import (
     AXIS_NAMES_3D,
     FitReport,
@@ -60,9 +63,13 @@ DEFAULT_BACKUP_DIR = Path("/tmp") / f"point-picker-{getpass.getuser()}"
 UNDO_LIMIT = 200
 
 # (napari shortcut, display text, PointPickerWidget method, description).
-# A method of None marks a key bound elsewhere (T, in ortho_view_manager).
+# A method of None marks an input bound elsewhere: T and C in
+# ortho_view_manager, Shift+drag as a mouse callback
+# (PointPickerWidget.install_shift_drag).
 KEYBINDINGS = (
     ("T", "T", None, "crosshair to mouse"),
+    ("C", "C", None, "switch xz / yz view"),
+    (None, "Shift+drag", None, "nudge moving image"),
     ("Q", "Q", "record_fixed", "set fixed point"),
     ("W", "W", "record_moving", "set moving point"),
     ("Shift-Q", "Shift+Q", "go_to_fixed", "go to fixed point"),
@@ -76,6 +83,20 @@ KEYBINDINGS = (
 
 _ACTIVE_PICKER = None  # weakref to the most recently created picker
 _ACTIONS_REGISTERED = False
+
+
+@contextlib.contextmanager
+def _busy():
+    """Show a wait cursor while a slow step blocks the interface."""
+    app = QApplication.instance()
+    if app is not None:
+        app.setOverrideCursor(Qt.WaitCursor)
+        app.processEvents()
+    try:
+        yield
+    finally:
+        if app is not None:
+            app.restoreOverrideCursor()
 
 
 def _active_picker():
@@ -772,6 +793,11 @@ class PointPickerWidget(QWidget):
         # after which its source data no longer matches what is displayed.
         self._rebased = False
 
+        # Raw (data, contrast_limits, gamma) of each layer while the bead
+        # filter is on. For the moving layer, data is its source: what Apply
+        # resamples from (see _moving_source).
+        self._bead_raw: dict[str, tuple] = {}
+
         self._preview_viewers: list = []
         self._preview_workers: list = []
         self.preview_show_window = True
@@ -815,6 +841,9 @@ class PointPickerWidget(QWidget):
         self.layers_label = QLabel()
         self.layers_label.setWordWrap(True)
         self.layers_label.setTextFormat(Qt.RichText)
+        self.colour_label = QLabel()
+        self.colour_label.setTextFormat(Qt.RichText)
+        self.colour_label.setWordWrap(True)
 
         self.table = QTableWidget()
         self.table.setColumnCount(7)
@@ -944,6 +973,26 @@ class PointPickerWidget(QWidget):
         preview_layout.addWidget(self.preview_estimate_button)
         preview_group.setLayout(preview_layout)
 
+        display_group = QGroupBox("Display")
+        self.enhance_button = QPushButton("Enhance Beads")
+        self.enhance_button.setToolTip(
+            "Remove the background and isolated noise voxels from both "
+            "images, then auto-contrast them and set gamma to 0.5. Display "
+            "only: picks "
+            "and fits are unchanged."
+        )
+        self.enhance_button.clicked.connect(self.enhance_beads)
+        self.undo_enhance_button = QPushButton("Undo Enhance")
+        self.undo_enhance_button.setToolTip(
+            "Show the raw images again, with their previous contrast. Slow "
+            "while an affine is applied: the moving image is resampled."
+        )
+        self.undo_enhance_button.clicked.connect(self.undo_enhance_beads)
+        display_layout = QHBoxLayout()
+        display_layout.addWidget(self.enhance_button)
+        display_layout.addWidget(self.undo_enhance_button)
+        display_group.setLayout(display_layout)
+
         nudge_group = QGroupBox("Nudge Offset")
         nudge_layout = QVBoxLayout()
         nudge_spin_layout = QHBoxLayout()
@@ -951,7 +1000,7 @@ class PointPickerWidget(QWidget):
         for axis_label in ("Z", "Y", "X"):
             label = QLabel(axis_label)
             spin = QDoubleSpinBox()
-            spin.setRange(-10000, 10000)
+            spin.setRange(-1e6, 1e6)
             spin.setSingleStep(1.0)
             spin.setDecimals(1)
             spin.setValue(0.0)
@@ -1001,6 +1050,8 @@ class PointPickerWidget(QWidget):
         scroll.setWidget(content)
 
         layout = QVBoxLayout()
+        layout.addWidget(display_group)
+        layout.addWidget(self.colour_label)
         layout.addWidget(self.keys_label)
         layout.addWidget(self.canvas_keys_checkbox)
         layout.addWidget(scroll)
@@ -1020,7 +1071,43 @@ class PointPickerWidget(QWidget):
             return "full-resolution voxels"
         return "world units"
 
+    def _layer_colour(self, name: str) -> tuple[str, str]:
+        """The colormap name of a layer and a CSS colour for it."""
+        layer = self.viewer.layers[name] if name in self.viewer.layers else None
+        colormap = getattr(layer, "colormap", None)
+        if colormap is None:
+            return "", ""
+        rgb = np.clip(np.asarray(colormap.colors)[-1, :3], 0, 1)
+        css = "#" + "".join(f"{round(c * 255):02x}" for c in rgb)
+        return colormap.name, css
+
+    def _colour_html(self) -> str:
+        parts = []
+        for role, name in (
+            ("Fixed", self.layer1_name),
+            ("Moving", self.layer2_name),
+        ):
+            colour, css = self._layer_colour(name)
+            if colour:
+                parts.append(
+                    f"<b>{role}</b> is "
+                    f"<b><span style='color:{css}'>{html.escape(colour)}</span></b>"
+                )
+        return " · ".join(parts)
+
+    def _colour_text(self) -> str:
+        parts = []
+        for role, name in (
+            ("fixed", self.layer1_name),
+            ("moving", self.layer2_name),
+        ):
+            colour, _ = self._layer_colour(name)
+            if colour:
+                parts.append(f"{role} = {colour}")
+        return ", ".join(parts)
+
     def _update_layers_label(self) -> None:
+        self.colour_label.setText(self._colour_html())
         self.layers_label.setText(
             f"<b>Fixed:</b> {html.escape(self.layer1_name)}<br>"
             f"<b>Moving:</b> {html.escape(self.layer2_name)}<br>"
@@ -1029,6 +1116,7 @@ class PointPickerWidget(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._update_layers_label()
         if not self._overlay_active:
             self.set_canvas_overlay_active(True)
 
@@ -1038,6 +1126,7 @@ class PointPickerWidget(QWidget):
         self._update_canvas_overlay()
 
     def _update_canvas_overlay(self) -> None:
+        self.colour_label.setText(self._colour_html())
         overlay = self.viewer.text_overlay
         if not (self._overlay_active and self.canvas_keys_checkbox.isChecked()):
             if getattr(self, "_overlay_shown", False):
@@ -1069,6 +1158,9 @@ class PointPickerWidget(QWidget):
             f"{display} {description}"
             for _, display, _, description in KEYBINDINGS
         )
+        colours = self._colour_text()
+        if colours:
+            status += f" | {colours}"
         return f"{status}\n{keys}"
 
     def cleanup(self) -> None:
@@ -1201,6 +1293,76 @@ class PointPickerWidget(QWidget):
         """Reset the nudge offset and restore layer2.translate to its base value."""
         if not np.allclose(self._nudge_offset, 0):
             self._reset_nudge()
+
+    def set_nudge_offset(self, offset) -> None:
+        """Set the nudge offset (world units, z y x) and move the moving layer.
+
+        Rounded to the spin boxes' precision, so the offset applied is the
+        one they show.
+        """
+        offset = np.asarray(offset, dtype=float)
+        for spin, value in zip(self._nudge_spins, offset, strict=True):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+        self._apply_nudge()
+
+    # ------------------------------------------------------------ shift-drag
+
+    def install_shift_drag(self, viewer_model: ViewerModel) -> None:
+        """Let Shift+drag in *viewer_model*'s canvas nudge the moving layer."""
+        if self._shift_drag not in viewer_model.mouse_drag_callbacks:
+            viewer_model.mouse_drag_callbacks.append(self._shift_drag)
+
+    def uninstall_shift_drag(self, viewer_model: ViewerModel) -> None:
+        with contextlib.suppress(ValueError):
+            viewer_model.mouse_drag_callbacks.remove(self._shift_drag)
+
+    def _shift_drag(self, viewer_model: ViewerModel, event):
+        """Translate the moving layer with the mouse while Shift is held.
+
+        The drag moves the nudge offset by the mouse's world displacement in
+        the pane's two displayed axes. The nudge is a display offset only:
+        moving points are stored with it subtracted, so existing pairs, the
+        fit and saved picks do not change.
+
+        Only the mouse's own motion counts: the world under a still mouse
+        moves when the camera re-centres on the crosshair, and the sliced
+        axis follows the crosshair, so both are taken out. Moves are whole
+        steps of the view's voxel grid, so the crosshair keeps its voxel
+        instead of re-snapping as the moving layer's extent changes (the
+        spin boxes still take fractional offsets).
+        """
+        if "Shift" not in event.modifiers or viewer_model.dims.ndisplay != 2:
+            return
+        if self.layer2_name not in self.viewer.layers:
+            return
+        self._capture_translates()
+        dims = viewer_model.dims
+        axes = list(dims.displayed)
+        steps = np.array([dims.range[a].step for a in axes], dtype=float)
+        steps[steps <= 0] = 1.0
+        start = np.asarray(event.position, dtype=float)[axes]
+        base = self._nudge_offset.copy()
+        camera = viewer_model.camera
+        camera_start = np.asarray(camera.center, dtype=float)[-len(axes) :]
+        was_panning = camera.mouse_pan
+        camera.mouse_pan = False
+        try:
+            yield
+            while event.type == "mouse_move":
+                moved = np.asarray(event.position, dtype=float)[axes] - start
+                moved -= (
+                    np.asarray(camera.center, dtype=float)[-len(axes) :]
+                    - camera_start
+                )
+                moved = np.round(moved / steps) * steps
+                delta = np.zeros(dims.ndim)
+                delta[axes] = moved
+                self.set_nudge_offset(base + delta[-len(base) :])
+                yield
+        finally:
+            camera.mouse_pan = was_panning
 
     # ------------------------------------------------------ editing pairs
 
@@ -1719,6 +1881,8 @@ class PointPickerWidget(QWidget):
         )
 
         has_snapshot = self.transform_snapshot is not None
+        self.enhance_button.setEnabled(not self.beads_enhanced)
+        self.undo_enhance_button.setEnabled(self.beads_enhanced)
         self.reset_button.setEnabled(has_snapshot)
         self.restart_button.setEnabled(has_snapshot)
         self.undo_button.setEnabled(bool(self._undo_stack))
@@ -1844,10 +2008,6 @@ class PointPickerWidget(QWidget):
                 "apply an affine."
             )
             return
-        ndim = affine.shape[0] - 1
-        A_lin = affine[:ndim, :ndim]
-        A_trans = affine[:ndim, ndim]
-        A_lin_inv = np.linalg.inv(A_lin)
 
         # Snapshot current state if not already done
         if self.transform_snapshot is None:
@@ -1880,6 +2040,34 @@ class PointPickerWidget(QWidget):
         print("[PointPicker] Data-space affine (layer2 → layer1):")
         print(data_affine)
         self._print_data_space_residuals(data_affine)
+
+        self._resample_moving(affine)
+
+        self._applied_affine = affine
+        self.affine_applied.emit(affine)
+        self._update_button_states()
+
+        if not np.allclose(self._nudge_offset, 0):
+            self._reset_nudge_button.setStyleSheet(
+                "QPushButton { background-color: #c0392b; color: white; }"
+            )
+            show_warning(
+                "Affine applied while nudge is active. "
+                "Consider resetting the nudge offset to see the "
+                "aligned result without the extra translation."
+            )
+
+    def _resample_moving(self, affine: np.ndarray) -> None:
+        """Show the moving layer's snapshot data mapped through *affine*.
+
+        The output is placed at the bounding box of the mapped volume, with
+        any nudge on top. Uses ``transform_snapshot``, which must be set.
+        """
+        layer = self.viewer.layers[self.layer2_name]
+        ndim = affine.shape[0] - 1
+        A_lin = affine[:ndim, :ndim]
+        A_trans = affine[:ndim, ndim]
+        A_lin_inv = np.linalg.inv(A_lin)
 
         # Layer2's original translate (not current; current may be bbox_min
         # from a previous application)
@@ -1938,20 +2126,6 @@ class PointPickerWidget(QWidget):
         self._affine_base_translate = bbox_min.astype(float)
         layer.translate = self._affine_base_translate + self._nudge_offset
 
-        self._applied_affine = affine
-        self.affine_applied.emit(affine)
-        self._update_button_states()
-
-        if not np.allclose(self._nudge_offset, 0):
-            self._reset_nudge_button.setStyleSheet(
-                "QPushButton { background-color: #c0392b; color: white; }"
-            )
-            show_warning(
-                "Affine applied while nudge is active. "
-                "Consider resetting the nudge offset to see the "
-                "aligned result without the extra translation."
-            )
-
     def _reset_transform(self) -> None:
         """Reset the transform of the moving layer to the snapshot state."""
 
@@ -1996,6 +2170,17 @@ class PointPickerWidget(QWidget):
             np.array(layer.translate, dtype=float) - self._nudge_offset
         )
 
+        if self.layer2_name in self._bead_raw:
+            # The displayed (resampled, enhanced) image becomes the new
+            # source; keep the raw copy matching it so Undo Enhance works.
+            raw, limits, gamma = self._bead_raw[self.layer2_name]
+            shown = layer.data
+            with _busy():
+                self.transform_snapshot["data"] = raw
+                self._resample_moving(self._applied_affine)
+            self._bead_raw[self.layer2_name] = (layer.data, limits, gamma)
+            layer.data = shown
+
         self._undo_stack.clear()
         # Start a new autosave file so the old pairs stay recoverable.
         self.autosave_path = None
@@ -2005,6 +2190,93 @@ class PointPickerWidget(QWidget):
         self._affine_base_translate = None
         self._rebased = True
         self.clear_pairs()
+
+    # --------------------------------------------------------- bead filter
+
+    @property
+    def beads_enhanced(self) -> bool:
+        return bool(self._bead_raw)
+
+    def _moving_source(self):
+        """What Apply resamples the moving layer from."""
+        if self.transform_snapshot is not None:
+            return self.transform_snapshot["data"]
+        return self.viewer.layers[self.layer2_name].data
+
+    def _set_moving_source(self, data) -> None:
+        """Replace the moving layer's source and redisplay it."""
+        if self.transform_snapshot is None:
+            self.viewer.layers[self.layer2_name].data = data
+        else:
+            self.transform_snapshot["data"] = data
+            self._resample_moving(self._applied_affine)
+
+    def enhance_beads(self) -> None:
+        """Apply the bead display filter to both layers (see bead_display).
+
+        The raw data stays in memory for :meth:`undo_enhance_beads`. While
+        an affine is applied, the moving image's source is filtered and the
+        applied affine resampled again, so Apply, Reset Transform and Reset
+        (keep view) keep working on the filtered image.
+        """
+        if self.beads_enhanced:
+            return
+        layers = self.viewer.layers
+        names = [n for n in (self.layer1_name, self.layer2_name) if n in layers]
+        sources = {
+            n: self._moving_source() if n == self.layer2_name else layers[n].data
+            for n in names
+        }
+        bad = [n for n, d in sources.items() if np.ndim(d) != 3]
+        if bad:
+            show_warning(
+                "Point picker: the bead filter needs 3D images; "
+                f"{', '.join(bad)} is not."
+            )
+            return
+        full_res = self._uses_full_res_units()
+        with _busy():
+            for name in names:
+                layer = layers[name]
+                # World units are full-resolution voxels here, so the scale
+                # is the pyramid level's downsampling factor.
+                factor = np.asarray(layer.scale, dtype=float)[-3:] if full_res else 1
+                shown, _ = enhance_beads(
+                    np.asarray(sources[name]), level_factor=factor
+                )
+                self._bead_raw[name] = (
+                    sources[name],
+                    tuple(layer.contrast_limits),
+                    float(layer.gamma),
+                )
+                if name == self.layer2_name:
+                    self._set_moving_source(shown)
+                else:
+                    layer.data = shown
+                # Same as the layer controls' auto-contrast "once" button:
+                # the shown slice's range.
+                layer.reset_contrast_limits()
+                layer.gamma = DISPLAY_GAMMA
+        self._update_button_states()
+
+    def undo_enhance_beads(self) -> None:
+        """Show the raw data again, with the contrast it had before."""
+        if not self.beads_enhanced:
+            return
+        layers = self.viewer.layers
+        with _busy():
+            for name, (raw, limits, gamma) in self._bead_raw.items():
+                if name not in layers:
+                    continue
+                layer = layers[name]
+                if name == self.layer2_name:
+                    self._set_moving_source(raw)
+                else:
+                    layer.data = raw
+                layer.contrast_limits = limits
+                layer.gamma = gamma
+        self._bead_raw.clear()
+        self._update_button_states()
 
     # ------------------------------------------------- programmatic access
 

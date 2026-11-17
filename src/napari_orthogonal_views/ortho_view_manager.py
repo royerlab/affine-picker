@@ -1,4 +1,3 @@
-import contextlib
 import warnings
 import weakref
 from collections.abc import Callable
@@ -16,8 +15,10 @@ from napari.viewer import Viewer
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QLayout,
+    QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -78,6 +79,26 @@ def init_actions():
         keymapprovider=ViewerModel,
     )
     action_manager.bind_shortcut("napari:move_point", "T")
+    action_manager.register_action(
+        name="napari:switch_ortho_view",
+        command=_switch_ortho_view_command,
+        description="Switch the orthogonal view between xz and yz",
+        keymapprovider=ViewerModel,
+    )
+    action_manager.bind_shortcut("napari:switch_ortho_view", "C")
+
+
+# The orthogonal view under the main view: index in OrthoViewManager.ortho_stack.
+ORTHO_VIEWS = ("xz", "yz")
+SWITCH_ORTHO_KEY = "C"
+
+
+def _switch_ortho_view_command(viewer_model: ViewerModel) -> None:
+    """Hotkey: switch the shown orthogonal view of the manager owning *viewer_model*."""
+    for manager in list(_VIEWER_MANAGERS.values()):
+        if any(viewer_model is m for m in manager._picker_viewer_models()):
+            manager.switch_ortho_view()
+            return
 
 
 class OrthoViewManager:
@@ -85,9 +106,10 @@ class OrthoViewManager:
     views.
 
     Behavior:
-    Inserts a container (splitter layout) with the original canvas, plus two orthogonal
-     views and a controls widget into the same index in the central widget's layout so the
-     QMainWindow geometry is preserved.
+    Inserts a container into the same index in the central widget's layout, so the
+    QMainWindow geometry is preserved. Its left column holds the original canvas over
+    one orthogonal view (xz or yz, see ``switch_ortho_view``); the settings tabs fill
+    the right column.
     """
 
     def __init__(
@@ -106,7 +128,6 @@ class OrthoViewManager:
             self.main_window = viewer.window._qt_window
         self._central = self.main_window.centralWidget()
         self._container: QWidget | None = None
-        self._splitter_handlers: list[tuple[QSplitter, object]] = []
         self._shown = False
         self.sync_filters = None
         self.activate_checkboxes = (
@@ -174,30 +195,28 @@ class OrthoViewManager:
             **picker_kwargs,
         )
 
-        # Build orthogonal layout (splitters + widgets)
-        self.h_splitter_top = QSplitter(Qt.Horizontal)
-        self.h_splitter_top.addWidget(self._original_qt_viewer)
-        self.h_splitter_top.addWidget(self.right_widget)
+        # Layout: left column holds the main view over one orthogonal view
+        # (xz or yz, switched with the C key or the Controls tab); the
+        # settings tabs fill the right column.
+        self.ortho_stack = QStackedWidget()
+        self.ortho_stack.addWidget(self.bottom_widget)  # xz
+        self.ortho_stack.addWidget(self.right_widget)  # yz
+        self._ortho_view = "xz"
 
-        self.h_splitter_bottom = QSplitter(Qt.Horizontal)
-        self.h_splitter_bottom.addWidget(self.bottom_widget)
-        self.h_splitter_bottom.addWidget(self.controls_tab)
+        self.left_splitter = QSplitter(Qt.Vertical)
+        self.left_splitter.addWidget(self._original_qt_viewer)
+        self.left_splitter.addWidget(self.ortho_stack)
 
-        self.v_splitter = QSplitter(Qt.Vertical)
-        self.v_splitter.addWidget(self.h_splitter_top)
-        self.v_splitter.addWidget(self.h_splitter_bottom)
+        self.h_splitter = QSplitter(Qt.Horizontal)
+        self.h_splitter.addWidget(self.left_splitter)
+        self.h_splitter.addWidget(self.controls_tab)
 
-        # Sync the two horizontal splitters so user movement mirrors to the other
-        def _connect_sync(source: QSplitter, target: QSplitter):
-            def handler(*args, **kwargs):
-                sizes = source.sizes()
-                target.setSizes(sizes)
-
-            source.splitterMoved.connect(handler)
-            self._splitter_handlers.append((source, handler))
-
-        _connect_sync(self.h_splitter_top, self.h_splitter_bottom)
-        _connect_sync(self.h_splitter_bottom, self.h_splitter_top)
+        self.switch_view_button = QPushButton()
+        self.switch_view_button.clicked.connect(self.switch_ortho_view)
+        self.main_controls_widget.main_layout.insertWidget(
+            1, self.switch_view_button
+        )
+        self._update_switch_button()
 
         # insert the container into the original central widget layout at the same
         # position
@@ -205,7 +224,7 @@ class OrthoViewManager:
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         container_layout = QVBoxLayout()
         container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.addWidget(self.v_splitter)
+        container_layout.addWidget(self.h_splitter)
         container.setLayout(container_layout)
 
         layout.insertWidget(0, container)
@@ -360,11 +379,8 @@ class OrthoViewManager:
             layer_hooks=self._layer_hooks,
         )
 
-        old_right = self.right_widget
-        idx = self.h_splitter_top.indexOf(old_right)
-        self.h_splitter_top.replaceWidget(idx, new_right)
+        self._replace_ortho_widget(self.right_widget, new_right)
         self.right_widget = new_right
-        old_right.deleteLater()
 
         # Replace bottom widget with OrthoViewWidget
         new_bottom = OrthoViewWidget(
@@ -374,11 +390,9 @@ class OrthoViewManager:
             sync_filters=self.sync_filters,
             layer_hooks=self._layer_hooks,
         )
-        old_bottom = self.bottom_widget
-        idx = self.h_splitter_bottom.indexOf(old_bottom)
-        self.h_splitter_bottom.replaceWidget(idx, new_bottom)
+        self._replace_ortho_widget(self.bottom_widget, new_bottom)
         self.bottom_widget = new_bottom
-        old_bottom.deleteLater()
+        self._show_ortho_page()
 
         # Connect to signals that update the dims order in the main viewer
         self.viewer.dims.events.order.connect(self.update_dims_order)
@@ -406,8 +420,13 @@ class OrthoViewManager:
         if self.controls_tab.indexOf(self.point_picker_widget) == -1:
             self.controls_tab.addTab(self.point_picker_widget, "Point Picker")
 
-        # assign 30% of window width and height to orth views
-        self._set_splitter_sizes(0.3, 0.3)
+        # Shift+drag in any pane nudges the moving layer
+        for model in self._picker_viewer_models():
+            self.point_picker_widget.install_shift_drag(model)
+
+        # settings column: a quarter of the width; ortho view: a third of
+        # the height
+        self._set_splitter_sizes(0.25, 0.33)
 
         self._shown = True
 
@@ -434,26 +453,21 @@ class OrthoViewManager:
         if not self._shown:
             return
 
+        for model in self._picker_viewer_models():
+            self.point_picker_widget.uninstall_shift_drag(model)
+
         if isinstance(self.right_widget, OrthoViewWidget):
             self.right_widget.cleanup()
         if isinstance(self.bottom_widget, OrthoViewWidget):
             self.bottom_widget.cleanup()
 
-        # Replace right widget
+        # Put empty placeholders back
         new_right = QWidget()
-        old_right = self.right_widget
-        idx = self.h_splitter_top.indexOf(old_right)
-        self.h_splitter_top.replaceWidget(idx, new_right)
+        self._replace_ortho_widget(self.right_widget, new_right)
         self.right_widget = new_right
-        old_right.deleteLater()
-
-        # Replace bottom widget
         new_bottom = QWidget()
-        old_bottom = self.bottom_widget
-        idx = self.h_splitter_bottom.indexOf(old_bottom)
-        self.h_splitter_bottom.replaceWidget(idx, new_bottom)
+        self._replace_ortho_widget(self.bottom_widget, new_bottom)
         self.bottom_widget = new_bottom
-        old_bottom.deleteLater()
 
         # Removes controls and resize widgets.
         self.main_controls_widget.remove_controls()
@@ -476,6 +490,14 @@ class OrthoViewManager:
         self.viewer.axes.visible = False
 
         self._shown = False
+
+    def _picker_viewer_models(self) -> list:
+        """The main viewer and the ortho views' viewer models that are shown."""
+        models = [self.viewer]
+        for widget in (self.right_widget, self.bottom_widget):
+            if isinstance(widget, OrthoViewWidget):
+                models.append(widget.vm_container.viewer_model)
+        return models
 
     def update_screen_recorder_axes(self):
         """When the number of dimensions is updated in the main viewer, also update the
@@ -557,7 +579,11 @@ class OrthoViewManager:
     def _set_splitter_sizes(
         self, side_fraction: float, bottom_fraction: float
     ) -> None:
-        """Adjust the size of the right and bottom part of the splitters."""
+        """Size the settings column and the orthogonal view under the main view.
+
+        *side_fraction* is the right column's share of the width and
+        *bottom_fraction* the orthogonal view's share of the height.
+        """
 
         central = self._central
 
@@ -566,13 +592,46 @@ class OrthoViewManager:
         side_width = max(1, int(central_width * side_fraction))
         bottom_height = max(1, int(central_height * bottom_fraction))
 
-        self.h_splitter_top.setSizes([central_width - side_width, side_width])
-        self.h_splitter_bottom.setSizes(
-            [central_width - side_width, side_width]
-        )
-        self.v_splitter.setSizes(
+        self.h_splitter.setSizes([central_width - side_width, side_width])
+        self.left_splitter.setSizes(
             [central_height - bottom_height, bottom_height]
         )
+
+    # ----------------------------------------------- shown orthogonal view
+
+    @property
+    def ortho_view(self) -> str:
+        """The orthogonal view under the main view: "xz" or "yz"."""
+        return self._ortho_view
+
+    def set_ortho_view(self, view: str) -> None:
+        """Show the xz or the yz view under the main view."""
+        if view not in ORTHO_VIEWS:
+            raise ValueError(f"view must be one of {ORTHO_VIEWS}, got {view!r}")
+        self._ortho_view = view
+        self._show_ortho_page()
+        self._update_switch_button()
+
+    def switch_ortho_view(self) -> None:
+        """Swap the view under the main view between xz and yz."""
+        self.set_ortho_view("yz" if self._ortho_view == "xz" else "xz")
+
+    def _show_ortho_page(self) -> None:
+        widget = self.bottom_widget if self._ortho_view == "xz" else self.right_widget
+        self.ortho_stack.setCurrentWidget(widget)
+
+    def _update_switch_button(self) -> None:
+        other = "yz" if self._ortho_view == "xz" else "xz"
+        self.switch_view_button.setText(
+            f"Showing {self._ortho_view} view: switch to {other} "
+            f"({SWITCH_ORTHO_KEY})"
+        )
+
+    def _replace_ortho_widget(self, old: QWidget, new: QWidget) -> None:
+        index = self.ortho_stack.indexOf(old)
+        self.ortho_stack.removeWidget(old)
+        self.ortho_stack.insertWidget(index, new)
+        old.deleteLater()
 
     def screenshot(
         self,
@@ -729,12 +788,6 @@ class OrthoViewManager:
             if self._original_qt_viewer is not None:
                 layout.insertWidget(0, self._original_qt_viewer)
 
-        # Disconnect all splitter signal handlers
-        for splitter, handler in self._splitter_handlers:
-            with contextlib.suppress(TypeError, RuntimeError):
-                splitter.splitterMoved.disconnect(handler)
-        self._splitter_handlers.clear()
-
         # Hide the hotkey overlay and restore layer2 translate if nudged
         self.point_picker_widget.cleanup()
 
@@ -745,9 +798,9 @@ class OrthoViewManager:
             self.main_controls_widget,
             self.screen_recorder_widget,
             self.point_picker_widget,
-            getattr(self, "h_splitter_top", None),
-            getattr(self, "h_splitter_bottom", None),
-            getattr(self, "v_splitter", None),
+            getattr(self, "ortho_stack", None),
+            getattr(self, "left_splitter", None),
+            getattr(self, "h_splitter", None),
         ):
             if w is not None:
                 w.deleteLater()

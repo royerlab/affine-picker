@@ -245,3 +245,40 @@ def test_screen_record_with_views(make_napari_viewer, qtbot):
         assert os.path.getsize(filepath) > 0
 
     m.cleanup()
+
+
+def test_one_ortho_view_under_main_view_switches(make_napari_viewer, qtbot):
+    from napari_orthogonal_views.ortho_view_manager import (
+        _switch_ortho_view_command,
+    )
+
+    viewer = make_napari_viewer()
+    viewer.add_image(np.zeros((10, 20, 30)))
+    m = _get_manager(viewer)
+    show_orthogonal_views(viewer)
+    qtbot.waitUntil(m.is_shown, timeout=1000)
+    # The settings tabs are the right column, beside the main and ortho views.
+    assert m.h_splitter.widget(1) is m.controls_tab
+    assert m.left_splitter.widget(1) is m.ortho_stack
+    assert m.ortho_view == "xz"
+    assert m.ortho_stack.currentWidget() is m.bottom_widget
+    assert "switch to yz" in m.switch_view_button.text()
+
+    m.switch_view_button.click()
+    assert m.ortho_view == "yz"
+    assert m.ortho_stack.currentWidget() is m.right_widget
+    # The hotkey works from the main canvas and from an ortho canvas.
+    _switch_ortho_view_command(m.right_widget.vm_container.viewer_model)
+    assert m.ortho_view == "xz"
+    _switch_ortho_view_command(viewer)
+    assert m.ortho_view == "yz"
+
+    # Screenshots still include either view, shown or not.
+    assert m.screenshot(include_right=True, include_bottom=True).ndim == 3
+
+    hide_orthogonal_views(viewer)
+    qtbot.waitUntil(lambda: not m.is_shown(), timeout=1000)
+    show_orthogonal_views(viewer)
+    qtbot.waitUntil(m.is_shown, timeout=1000)
+    assert m.ortho_stack.currentWidget() is m.right_widget  # choice kept
+    m.cleanup()

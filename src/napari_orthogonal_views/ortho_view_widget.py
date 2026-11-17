@@ -4,6 +4,7 @@ from collections.abc import Callable
 from types import MethodType
 
 import napari
+import numpy as np
 from napari.components.viewer_model import ViewerModel
 from napari.layers import Labels, Layer
 from napari.qt import QtViewer
@@ -294,6 +295,9 @@ class OrthoViewWidget(QWidget):
         self._block_center = False
         self._block_step = False
         self._layer_hooks = layer_hooks
+        # World position of the crosshair at the last step event, to tell a
+        # real move from a re-indexing (see _update_current_step).
+        self._last_world: np.ndarray | None = None
 
         # create container to store viewer model in
         self.vm_container = ViewerModelContainer(
@@ -463,6 +467,19 @@ class OrthoViewWidget(QWidget):
             source.range[i].start + event.value[i] * source.range[i].step
             for i in range(len(event.value))
         )
+        # A layer moving or growing (a nudge, a resample) changes where the
+        # world range starts, so the step index changes while the crosshair
+        # stays put, or snaps by under half a voxel onto the new grid. Only
+        # a real move may re-centre a camera: one zoomed in elsewhere would
+        # otherwise jump to the crosshair.
+        world = np.asarray(world_coords, dtype=float)
+        steps = np.array([r.step for r in source.range], dtype=float)
+        moved = (
+            self._last_world is None
+            or self._last_world.shape != world.shape
+            or bool(np.any(np.abs(world - self._last_world) > 0.5 * steps + 1e-9))
+        )
+        self._last_world = world
 
         for model in [
             self.viewer,
@@ -475,10 +492,13 @@ class OrthoViewWidget(QWidget):
             # for this model's dims.range
             model.dims.point = world_coords
 
+            if not moved:
+                continue
+
             # check if the camera center is in the field of view, if not, adjust
             camera_center = list(model.camera.center)
             new_y_center, new_x_center = check_center(
-                model, model.dims.current_step
+                model, model.dims.point
             )
             camera_center[-2] = new_y_center
             camera_center[-1] = new_x_center
@@ -541,16 +561,20 @@ class OrthoViewWidget(QWidget):
         self._connections.clear()
 
 
-def check_center(model: ViewerModel, coords: list[int]) -> tuple[int, int]:
+def check_center(
+    model: ViewerModel, coords: list[float]
+) -> tuple[float, float]:
     """Check if the given coordinates are in the current field of view, and if not adjust
     the camera center
 
     Args:
-        coords (list[int]): list of current step coordinates to check.
+        coords (list[float]): world coordinates to check (``dims.point``), one per
+            axis in world order. World coordinates, not step indices: the two differ
+            whenever a layer's extent does not start at 0 or its scale is not 1.
 
     Returns:
-        tuple [int, int]: (updated) y and x center coordinates to ensure the coordinates
-        are visible.
+        tuple [float, float]: (updated) y and x center coordinates to ensure the
+        coordinates are visible.
     """
 
     with warnings.catch_warnings():
@@ -565,9 +589,7 @@ def check_center(model: ViewerModel, coords: list[int]) -> tuple[int, int]:
     min_w = center[-1] - (w / 2)
     max_w = center[-1] + (w / 2)
 
-    order = model.dims.order
-    step = [model.dims.range[r].step for r in range(len(order))]
-    coords_reordered = [coords[i] * step[i] for i in order]
+    coords_reordered = [coords[i] for i in model.dims.order]
 
     y_in_view = coords_reordered[-2] > min_h and coords_reordered[-2] < max_h
     x_in_view = coords_reordered[-1] > min_w and coords_reordered[-1] < max_w
