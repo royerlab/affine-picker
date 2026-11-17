@@ -1073,8 +1073,10 @@ class PointPickerWidget(QWidget):
 
     def _layer_colour(self, name: str) -> tuple[str, str]:
         """The colormap name of a layer and a CSS colour for it."""
-        layer = self.viewer.layers[name] if name in self.viewer.layers else None
-        colormap = getattr(layer, "colormap", None)
+        try:
+            colormap = getattr(self.viewer.layers[name], "colormap", None)
+        except KeyError:
+            return "", ""
         if colormap is None:
             return "", ""
         rgb = np.clip(np.asarray(colormap.colors)[-1, :3], 0, 1)

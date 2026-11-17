@@ -6,6 +6,17 @@ from vispy.scene import Line
 from vispy.scene.node import Node
 
 
+def scene_overlays(viewer_model: ViewerModel):
+    """The viewer model's scene overlays, by name.
+
+    napari 0.9 keeps them in ``viewer.scene.overlays``; earlier versions in
+    ``viewer._overlays``.
+    """
+    scene = getattr(viewer_model, "scene", None)
+    overlays = getattr(scene, "overlays", None)
+    return overlays if overlays is not None else viewer_model._overlays
+
+
 class Crosshairs(Line):
     _base_segments = (
         np.array(
@@ -95,11 +106,13 @@ class VispyCrosshairOverlay(ViewerOverlayMixin, VispySceneOverlay):
         viewer: ViewerModel,
         overlay: CrosshairOverlay,
         parent: Node | None = None,
+        **kwargs,
     ) -> None:
         axis_order = getattr(overlay, "axis_order", (0, 1, 2))
         node = Crosshairs(axis_order=axis_order)
+        # kwargs: what this napari's overlay base also takes (font_info in 0.9)
         super().__init__(
-            node=node, viewer=viewer, overlay=overlay, parent=parent
+            node=node, viewer=viewer, overlay=overlay, parent=parent, **kwargs
         )
         self.viewer = viewer
         self.viewer.dims.events.current_step.connect(self._move_crosshairs)

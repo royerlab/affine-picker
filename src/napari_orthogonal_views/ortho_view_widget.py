@@ -16,7 +16,10 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from napari_orthogonal_views.cross_hair_overlay import CrosshairOverlay
+from napari_orthogonal_views.cross_hair_overlay import (
+    CrosshairOverlay,
+    scene_overlays,
+)
 
 
 def activate_on_hover(qt_viewer: QtViewer):
@@ -98,7 +101,7 @@ class ViewerModelContainer:
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self.viewer_model._overlays["crosshairs"] = self.cursor_overlay
+            scene_overlays(self.viewer_model)["crosshairs"] = self.cursor_overlay
 
     def _sync_layer_properties(
         self, orig_layer: Layer, copied_layer: Layer
@@ -579,7 +582,11 @@ def check_center(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        view_box = model._get_viewbox_size()
+        canvas = getattr(model, "canvas", None)
+        if hasattr(canvas, "viewbox_size"):  # napari 0.9
+            view_box = canvas.viewbox_size(model.layers)
+        else:
+            view_box = model._get_viewbox_size()
     zoom = model.camera.zoom
     center = model.camera.center
     h = view_box[0] / zoom

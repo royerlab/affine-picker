@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
 from napari_orthogonal_views.cross_hair_overlay import (
     CrosshairOverlay,
     VispyCrosshairOverlay,
+    scene_overlays,
 )
 from napari_orthogonal_views.ortho_view_widget import (
     OrthoViewWidget,
@@ -141,7 +142,7 @@ class OrthoViewManager:
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self.viewer._overlays["crosshairs"] = self.cursor_overlay
+            scene_overlays(self.viewer)["crosshairs"] = self.cursor_overlay
 
         # make sure the viewer activates on hover
         with warnings.catch_warnings():
@@ -273,13 +274,13 @@ class OrthoViewManager:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self.viewer._overlays["crosshairs"].visible = state
+            scene_overlays(self.viewer)["crosshairs"].visible = state
             if isinstance(self.right_widget, OrthoViewWidget):
-                self.right_widget.vm_container.viewer_model._overlays[
+                scene_overlays(self.right_widget.vm_container.viewer_model)[
                     "crosshairs"
                 ].visible = state
             if isinstance(self.bottom_widget, OrthoViewWidget):
-                self.bottom_widget.vm_container.viewer_model._overlays[
+                scene_overlays(self.bottom_widget.vm_container.viewer_model)[
                     "crosshairs"
                 ].visible = state
 
@@ -523,7 +524,8 @@ class OrthoViewManager:
         view_order = list(self.viewer.dims.order)
         ndim = len(view_order)
         view_order = [r - ndim for r in view_order]
-        self.cursor_overlay.axis_order = tuple(view_order[-3:])
+        if ndim >= 3:  # the crosshairs model holds 3 axes (and validates it)
+            self.cursor_overlay.axis_order = tuple(view_order[-3:])
 
         # update the dimension order in the orthoviews
         if len(self.viewer.dims.order) > 3:
