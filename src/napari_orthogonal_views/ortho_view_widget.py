@@ -27,9 +27,13 @@ def activate_on_hover(qt_viewer: QtViewer):
     canvas = qt_viewer.canvas.native
     canvas.setMouseTracking(True)
 
+    # napari 0.9 sets ViewerModel.mouse_over_canvas from its own enterEvent override on
+    # this widget; chain it so hotkeys that check the flag (T) still work.
+    previous_enter = canvas.enterEvent
+
     def on_enter(event):
         canvas.setFocus(Qt.MouseFocusReason)
-        return super(type(canvas), canvas).enterEvent(event)
+        return previous_enter(event)
 
     canvas.enterEvent = on_enter
 
